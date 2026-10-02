@@ -37,6 +37,7 @@ def test_real_qdrant_and_postgres_isolation() -> None:
     engine = create_engine(settings.database_url.replace("postgresql://", "postgresql+psycopg://", 1))
     with engine.begin() as connection:
         assert connection.execute(text("SELECT to_regclass('public.audit_logs')")).scalar() == "audit_logs"
+        connection.execute(text("INSERT INTO tenants (id, name) VALUES ('acme', 'Acme Integration') ON CONFLICT (id) DO NOTHING"))
         connection.execute(text("INSERT INTO audit_logs (id, tenant_id, user_id, action, details, timestamp, prev_hash, row_hash) VALUES (:id, :tenant, :user, 'query', '{}'::json, :timestamp, '', 'integration-hash')"), {"id": "integration-real-stack", "tenant": "acme", "user": "dave", "timestamp": datetime.now(timezone.utc)})
         with pytest.raises(Exception):
             connection.execute(text("UPDATE audit_logs SET action='tampered' WHERE id='integration-real-stack'"))
