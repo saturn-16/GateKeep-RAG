@@ -8,7 +8,7 @@ from app.db.models import Base
 
 config = context.config
 config.set_main_option("sqlalchemy.url", get_settings().database_url.replace("postgresql://", "postgresql+psycopg://", 1))
-if config.config_file_name:
+if config.config_file_name and config.get_section("loggers"):
     fileConfig(config.config_file_name)
 target_metadata = Base.metadata
 
