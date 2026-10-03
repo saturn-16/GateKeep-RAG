@@ -51,6 +51,5 @@ jobs:
       - run: python -m compileall -q src tests
       - run: python -m pip freeze | grep -v '^-e ' > audit-requirements.txt
       - run: pip-audit -r audit-requirements.txt --no-deps
-      - uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Run gitleaks
+        run: docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:latest detect --source=/repo --no-banner --redact --verbose
