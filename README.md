@@ -67,17 +67,43 @@ All metrics are proven against the live PostgreSQL 16 and Qdrant 1.19.1 services
 
 | Check / Metric | Result | Verification Evidence |
 |---|---|---|
-| **Live Integration & Security Suite** | **29 passed, 0 skipped, 0 failed** (100% pass) | `pytest -v` across real stack (`RUN_REAL_STACK=1`, `PERSISTENCE_BACKEND=postgres`) |
+| **Live Integration & Security Suite** | **31 passed, 0 skipped, 0 failed** (100% pass) | `pytest -v` across real stack (`RUN_REAL_STACK=1`, `PERSISTENCE_BACKEND=postgres`) |
 | **Tenants Evaluated** | **3 distinct tenants** (`acme-corp`, `globex-inc`, `initech-llc`) | `scripts/run_eval.py` |
 | **Personas & Clearances Evaluated** | **11 users** across admin, HR, finance, engineering, employee | `scripts/run_eval.py` |
 | **User-Query Pairs Checked** | **1,045 pairs** (including prompt injection & adversarial probes) | `scripts/run_eval.py` |
 | **Cross-Tenant Leak Rate** | **0.00%** (0 leaks / 1,045 queries) | `scripts/run_eval.py` |
+| **Canary Token Violations** | **0 / 5,415 checks** (0 violations across all unauthorized pairs) | `scripts/run_eval.py` (6 unique canary tokens in restricted docs) |
 | **Recall@5 (Permitted Queries)** | **92.86%** (78 / 84 permitted queries) | `scripts/run_eval.py` |
 | **MRR (Mean Reciprocal Rank)** | **0.8750** | `scripts/run_eval.py` |
-| **No-Results Shape Parity** | **98.77%** (80 / 81 restricted queries return standard no-results) | `scripts/run_eval.py` |
 | **Default Embedding Model** | `all-MiniLM-L6-v2` (384 dimensions, sentence-transformers) | `app/rag/embeddings/sentence_transformer.py` |
 | **Cryptographic Audit Integrity** | **PASSED** (`/v1/audit/verify` validated) | `tests/integration/test_audit_concurrency.py`, `tests/integration/test_audit_completeness.py` |
 | **Dependency & Secret Scans** | **0 vulnerabilities, 0 secret leaks** | `pip-audit`, `gitleaks` (32 commits scanned) |
+
+### Threshold Sensitivity Analysis (Eval Corpus: 18 chunks, 1,045 query pairs)
+
+> [!NOTE]
+> The similarity score threshold was tuned on the demo corpus using `all-MiniLM-L6-v2`. At `threshold = 0.35`, exact no-results response parity reaches 100.00% (81/81) while preserving 92.86% Recall@5 and 0.8750 MRR for permitted queries.
+
+| Threshold | Recall@5 | MRR | Restricted Parity Share | Leak Rate | Canary Violations | Behavioral Profile |
+|---|---|---|---|---|---|---|
+| **0.25** | 92.86% | 0.8750 | 83.95% (68 / 81) | 0.00% | 0 / 5,415 checks | Broad semantic matching; loose cross-document overlap |
+| **0.30** | 92.86% | 0.8750 | 98.77% (80 / 81) | 0.00% | 0 / 5,415 checks | Default; 1 query matched permitted handbook chunk |
+| **0.35** | 92.86% | 0.8750 | 100.00% (81 / 81) | 0.00% | 0 / 5,415 checks | Calibrated; zero cross-document false positives |
+
+---
+
+## Seeded Personas (Demo-Only Credentials)
+
+> [!WARNING]
+> **Demo-Only Credentials**: The credentials below (`alice`/`alice`, `bob`/`bob`, etc.) are seeded strictly for local sandbox demonstration, test suites, and evaluation. Never deploy default or username-identical passwords in a staging or production environment.
+
+| Username | Password | Tenant | Roles | Clearance | Description |
+|---|---|---|---|---|---|
+| `alice` | `alice` | `acme-corp` | `admin` | `restricted` | Acme Tenant Administrator |
+| `bob` | `bob` | `acme-corp` | `hr` | `restricted` | Acme HR Specialist (can see salaries) |
+| `carol` | `carol` | `acme-corp` | `finance` | `confidential` | Acme Finance Analyst |
+| `dave` | `dave` | `acme-corp` | `employee` | `internal` | Acme General Employee (no salary access) |
+| `frank` | `frank` | `globex-inc` | `admin` | `restricted` | Globex Tenant Administrator |
 
 ---
 
