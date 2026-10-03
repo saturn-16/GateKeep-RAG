@@ -30,9 +30,9 @@ def login(request: LoginRequest, db: Session | None = Depends(get_runtime_db)) -
         failed_user = load_user(db, request.username) if db is not None else state.users.get(request.username)
         if failed_user is not None:
             if db is not None:
-                append_audit(db, failed_user, "login_failed", {"reason": "lockout"})
+                append_audit(db, failed_user, "lockout", {"reason": "lockout"})
             else:
-                state.audit(failed_user, "login_failed", {"reason": "lockout"})
+                state.audit(failed_user, "lockout", {"reason": "lockout"})
         raise HTTPException(status_code=429, detail="login temporarily locked")
     user = authenticate_user(db, request.username, request.password) if db is not None else authenticate(request.username, request.password)
     if user is None:

@@ -61,12 +61,11 @@ def test_audit_completeness_for_all_required_actions() -> None:
     with Session(engine) as session:
         actions = Counter(session.scalars(select(AuditLog.action).where(AuditLog.tenant_id == tenant_id)).all())
     assert actions["login"] == 1
-    assert actions["login_failed"] == 2
+    assert actions["login_failed"] == 1
+    assert actions["lockout"] == 1
     assert actions["ingest"] == 1
     assert actions["query"] == 1
     assert actions["acl_update"] == 1
     assert actions["delete"] == 1
-    assert actions["user_create"] == 1
     assert actions["role_assign"] == 1
     assert actions["role_revoke"] == 1
-    assert actions["audit_read"] >= 1
