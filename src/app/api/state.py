@@ -51,10 +51,30 @@ def create_demo_state() -> ServiceState:
         "frank": User("frank", "globex-inc", hash_password("frank"), frozenset({"admin"}), "restricted"),
     }
     chunks = [
-        VectorChunk(ChunkACL("acme-corp", "handbook-acme", frozenset({"employee", "hr", "admin"}), sensitivity="internal"), "employee handbook benefits", 1.0, "handbook"),
-        VectorChunk(ChunkACL("acme-corp", "salary-acme", frozenset({"hr", "admin"}), sensitivity="restricted"), "salary band engineers acme 120000", 1.0, "salary"),
-        VectorChunk(ChunkACL("globex-inc", "salary-globex", frozenset({"hr", "admin"}), sensitivity="restricted"), "salary band engineers globex 90000", 1.0, "salary"),
+        VectorChunk(ChunkACL("acme-corp", "handbook-acme", frozenset({"employee", "hr", "admin"}), sensitivity="internal"), "employee handbook benefits", 1.0, "handbook-acme-doc"),
+        VectorChunk(ChunkACL("acme-corp", "salary-acme", frozenset({"hr", "admin"}), sensitivity="restricted"), "salary band engineers acme 120000", 1.0, "salary-acme-doc"),
+        VectorChunk(ChunkACL("globex-inc", "salary-globex", frozenset({"hr", "admin"}), sensitivity="restricted"), "salary band engineers globex 90000", 1.0, "salary-globex-doc"),
     ]
+    if settings.persistence_backend == "postgres":
+        try:
+            from app.db.models import Chunk as DbChunk, Document as DbDocument, Tenant as DbTenant, User as DbUser
+            from app.db.session import SessionLocal
+
+            with SessionLocal() as session:
+                for t_id in ("acme-corp", "globex-inc"):
+                    session.merge(DbTenant(id=t_id, name=t_id))
+                session.flush()
+                for u in users.values():
+                    session.merge(DbUser(id=u.user_id, tenant_id=u.tenant_id, password_hash=u.password_hash, clearance=u.clearance, active=u.active, roles=list(u.roles)))
+                for chunk in chunks:
+                    session.merge(DbDocument(id=chunk.doc_id, tenant_id=chunk.acl.tenant_id, title=chunk.doc_id.title(), status="ready", source="demo", created_by="alice" if chunk.acl.tenant_id == "acme-corp" else "frank"))
+                session.flush()
+                for chunk in chunks:
+                    content_hash = sha256(chunk.text.encode()).hexdigest()
+                    session.merge(DbChunk(id=chunk.acl.chunk_id, tenant_id=chunk.acl.tenant_id, document_id=chunk.doc_id, text=chunk.text, content_hash=content_hash, allowed_roles=sorted(chunk.acl.allowed_roles), allowed_users=sorted(chunk.acl.allowed_users), sensitivity=chunk.acl.sensitivity))
+                session.commit()
+        except Exception:
+            pass
     if settings.vector_backend == "qdrant":
         from app.rag.vectorstore.qdrant_store import QdrantVectorStore
 
