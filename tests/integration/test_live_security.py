@@ -72,7 +72,9 @@ def test_live_auth_revocation_injection_and_audit_scope() -> None:
     assert verified.status_code == 200
     assert verified.json()["valid"] is True
 
-    with engine.begin() as connection:
+    admin_url = settings.database_url.replace("postgresql://", "postgresql+psycopg://", 1).replace("gatekeep_app:gatekeep@", "gatekeep:gatekeep@")
+    admin_engine = create_engine(admin_url)
+    with admin_engine.begin() as connection:
         tamper_id = connection.execute(text("SELECT id FROM audit_logs WHERE tenant_id=:tenant ORDER BY timestamp LIMIT 1"), {"tenant": tenant_acme}).scalar_one()
         connection.execute(text("ALTER TABLE audit_logs DISABLE TRIGGER audit_logs_immutable"))
         connection.execute(text("UPDATE audit_logs SET row_hash=:hash WHERE id=:id"), {"hash": f"tampered-{uuid4()}", "id": tamper_id})

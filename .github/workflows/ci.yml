@@ -31,19 +31,31 @@ jobs:
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e .[test,security]
       - run: pip install pip-audit
-      - run: alembic upgrade head
+      - name: Cache HuggingFace and SentenceTransformers models
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/huggingface
+            ~/.cache/torch/sentence_transformers
+          key: ${{ runner.os }}-hf-models-${{ hashFiles('pyproject.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-hf-models-
+      - name: Run database migrations (as database owner)
+        run: alembic upgrade head
         env:
           DATABASE_URL: postgresql+psycopg://gatekeep:gatekeep@localhost:5432/gatekeep
-      - run: python scripts/seed_demo.py
+      - name: Seed demo data (as non-owner application role gatekeep_app)
+        run: python scripts/seed_demo.py
         env:
           PYTHONPATH: src
-          DATABASE_URL: postgresql+psycopg://gatekeep:gatekeep@localhost:5432/gatekeep
+          DATABASE_URL: postgresql+psycopg://gatekeep_app:gatekeep@localhost:5432/gatekeep
           PERSISTENCE_BACKEND: postgres
           VECTOR_BACKEND: qdrant
-      - run: python -m pytest -q -rs --cov=app --cov-report=term-missing
+      - name: Run test suite (as non-owner application role gatekeep_app)
+        run: python -m pytest -q -rs --cov=app --cov-report=term-missing -m "not ollama"
         env:
           PYTHONPATH: src
-          DATABASE_URL: postgresql+psycopg://gatekeep:gatekeep@localhost:5432/gatekeep
+          DATABASE_URL: postgresql+psycopg://gatekeep_app:gatekeep@localhost:5432/gatekeep
           PERSISTENCE_BACKEND: postgres
           VECTOR_BACKEND: qdrant
           RUN_REAL_STACK: "1"

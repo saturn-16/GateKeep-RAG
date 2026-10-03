@@ -29,7 +29,11 @@ redis = ["redis>=5,<6"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
-markers = ["real_stack: requires live Qdrant and PostgreSQL services"]
+markers = [
+  "real_stack: requires live Qdrant and PostgreSQL services",
+  "ollama: opt-in test requiring running Ollama daemon with llama3.2:3b",
+  "model_download: opt-in test requiring network model download",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

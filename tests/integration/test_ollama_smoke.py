@@ -8,7 +8,7 @@ from app.config import get_settings
 from app.main import app
 from app.rag.llm import MockLLM, OllamaLLM
 
-pytestmark = pytest.mark.real_stack
+pytestmark = [pytest.mark.real_stack, pytest.mark.ollama]
 
 
 def is_ollama_ready() -> bool:
