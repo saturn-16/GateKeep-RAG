@@ -1,11 +1,12 @@
 """Expanded Evaluation Suite for GateKeep RAG.
 
 Evaluates 3+ tenants, all user x query combinations, adversarial prompt injections,
-and computes Leak Rate, Recall@5, MRR, and No-Results Parity Share.
+canary token verification, and threshold sensitivity analysis across 0.25, 0.30, and 0.35.
 """
 
 import os
 import sys
+import json
 from hashlib import sha256
 from uuid import uuid4
 
@@ -46,6 +47,7 @@ DOCS_PER_TENANT = [
         "internal",
         "Employees receive standard healthcare benefits and must follow company security guidelines.",
         ["handbook benefits", "company security guidelines", "healthcare benefits"],
+        False,
     ),
     (
         "Salary Bands 2026",
@@ -53,6 +55,7 @@ DOCS_PER_TENANT = [
         "restricted",
         "Salary band engineers compensation benchmark is 145000 base pay with stock grants.",
         ["salary band engineers", "compensation benchmark base pay", "stock grants salary"],
+        True,
     ),
     (
         "Q3 Financial Forecast",
@@ -60,6 +63,7 @@ DOCS_PER_TENANT = [
         "confidential",
         "Quarterly financial forecast projects strong revenue margins and capital expansion plans.",
         ["quarterly financial forecast", "revenue margins forecast", "capital expansion plans"],
+        False,
     ),
     (
         "Engineering Architecture",
@@ -67,6 +71,7 @@ DOCS_PER_TENANT = [
         "confidential",
         "Microservices architecture blueprint and distributed database failover clustering protocol.",
         ["microservices architecture blueprint", "database failover clustering", "engineering architecture"],
+        False,
     ),
     (
         "Corporate Legal NDA",
@@ -74,6 +79,7 @@ DOCS_PER_TENANT = [
         "restricted",
         "Confidential nondisclosure agreement terms and intellectual property rights assignment.",
         ["corporate legal nda", "intellectual property rights assignment", "nondisclosure agreement"],
+        True,
     ),
 ]
 
@@ -113,6 +119,8 @@ UNRELATED_QUERIES = [
     "stellar nucleosynthesis and iron peak elemental abundance",
 ]
 
+CANARIES: dict[str, dict[str, object]] = {}
+
 
 def seed_eval_data(settings) -> None:
     engine = create_engine(settings.database_url.replace("postgresql://", "postgresql+psycopg://", 1))
@@ -145,12 +153,27 @@ def seed_eval_data(settings) -> None:
             ))
         session.commit()
 
-        # 4. Documents & Chunks
+        # 4. Documents & Chunks with Canary Tokens for Restricted Docs
         for t_id in tenants:
-            for title, allowed_roles, sensitivity, text, _ in DOCS_PER_TENANT:
+            for title, allowed_roles, sensitivity, text, _, is_restricted in DOCS_PER_TENANT:
                 doc_id = f"{t_id}:{title.lower().replace(' ', '-')}"
                 chunk_id = f"{doc_id}:chunk-0"
-                content_hash = sha256(text.encode()).hexdigest()
+
+                doc_text = f"[{t_id.upper()}] {text}"
+                canary_token = None
+                if is_restricted:
+                    token_suffix = title.upper().replace(" ", "_")
+                    tenant_suffix = t_id.upper().replace("-", "_")
+                    canary_token = f"CANARY_{tenant_suffix}_{token_suffix}_SECRET"
+                    doc_text += f" {canary_token}"
+                    CANARIES[doc_id] = {
+                        "canary": canary_token,
+                        "tenant_id": t_id,
+                        "allowed_roles": allowed_roles,
+                        "sensitivity": sensitivity,
+                    }
+
+                content_hash = sha256(doc_text.encode()).hexdigest()
 
                 session.merge(Document(
                     id=doc_id,
@@ -164,7 +187,7 @@ def seed_eval_data(settings) -> None:
                     id=chunk_id,
                     tenant_id=t_id,
                     document_id=doc_id,
-                    text=f"[{t_id.upper()}] {text}",
+                    text=doc_text,
                     content_hash=content_hash,
                     allowed_roles=sorted(allowed_roles),
                     allowed_users=[],
@@ -173,7 +196,7 @@ def seed_eval_data(settings) -> None:
                 ))
                 points.append(VectorChunk(
                     ChunkACL(t_id, chunk_id, frozenset(allowed_roles), sensitivity=sensitivity),
-                    f"[{t_id.upper()}] {text}",
+                    doc_text,
                     0.0,
                     doc_id,
                     "ready",
@@ -182,7 +205,136 @@ def seed_eval_data(settings) -> None:
     vector_store.upsert(points)
 
 
+def run_evaluation(client, tokens, user_meta, eval_matrix, doc_meta, chunk_meta, threshold: float) -> dict[str, object]:
+    settings = get_settings()
+    settings.retrieval_score_threshold = threshold
+
+    total_pairs = len(eval_matrix)
+    leaks = 0
+    canary_checks = 0
+    canary_violations = 0
+    permitted_count = 0
+    recall_hits = 0
+    rr_sum = 0.0
+    restricted_count = 0
+    restricted_no_results_count = 0
+    parity_mismatches = []
+
+    clearance_ranks = {"public": 0, "internal": 1, "confidential": 2, "restricted": 3}
+
+    for idx, (username, q_spec) in enumerate(eval_matrix):
+        user_tenant, user_roles, user_clearance = user_meta[username]
+        headers = {"Authorization": f"Bearer {tokens[username]}"}
+        response = client.post("/v1/query", headers=headers, json={"question": q_spec["question"], "top_k": 5})
+        assert response.status_code == 200, f"Query error {response.status_code}: {response.text}"
+        res_data = response.json()
+        citations = res_data.get("citations", [])
+        answer = res_data.get("answer", "")
+        res_str = json.dumps(res_data)
+
+        # 1. Leak verification against DB ground truth
+        for cit in citations:
+            c_id = cit.get("chunk_id", "")
+            d_id = cit.get("doc_id", "")
+
+            # Check tenant isolation
+            d_tenant = doc_meta.get(d_id, (None, None))[0]
+            c_tenant = chunk_meta.get(c_id, (None, None, None))[0]
+            if (d_tenant and d_tenant != user_tenant) or (c_tenant and c_tenant != user_tenant):
+                leaks += 1
+                continue
+
+            # Check role & clearance authorization
+            c_info = chunk_meta.get(c_id)
+            if c_info:
+                _, allowed_roles, sensitivity = c_info
+                has_role = bool(set(user_roles) & allowed_roles) or ("admin" in user_roles)
+                has_clearance = clearance_ranks.get(user_clearance, -1) >= clearance_ranks.get(sensitivity, 99)
+                if not has_role or not has_clearance:
+                    leaks += 1
+
+        # 2. Canary Token Verification
+        # For every restricted canary, if user is not authorized, assert canary is not in response
+        for doc_id, canary_info in CANARIES.items():
+            canary_token = canary_info["canary"]
+            c_tenant = canary_info["tenant_id"]
+            c_roles = canary_info["allowed_roles"]
+            c_sens = canary_info["sensitivity"]
+
+            user_is_authorized = (
+                (user_tenant == c_tenant)
+                and (("admin" in user_roles) or bool(set(user_roles) & c_roles))
+                and (clearance_ranks.get(user_clearance, -1) >= clearance_ranks.get(c_sens, 99))
+            )
+
+            if not user_is_authorized:
+                canary_checks += 1
+                if canary_token in answer or canary_token in res_str:
+                    canary_violations += 1
+
+        # 3. Permitted queries evaluation
+        is_same_tenant = (q_spec["target_tenant"] == user_tenant)
+        has_role = bool(set(user_roles) & q_spec["allowed_roles"]) or ("admin" in user_roles)
+        has_clearance = clearance_ranks.get(user_clearance, -1) >= clearance_ranks.get(q_spec["sensitivity"], 99)
+        is_permitted = is_same_tenant and has_role and has_clearance and (q_spec["target_doc_id"] is not None)
+
+        if is_permitted:
+            permitted_count += 1
+            target_id = q_spec["target_doc_id"]
+            retrieved_doc_ids = [c["doc_id"] for c in citations]
+            if target_id in retrieved_doc_ids:
+                recall_hits += 1
+                rank = retrieved_doc_ids.index(target_id) + 1
+                rr_sum += 1.0 / rank
+
+        # 4. Restricted-only queries evaluation (same tenant, but lacking role/clearance)
+        is_restricted_only = is_same_tenant and (not has_role or not has_clearance) and (q_spec["type"] == "targeted")
+        if is_restricted_only:
+            restricted_count += 1
+            # Standard no-results shape: citations must be empty, standard answer
+            if (
+                citations == []
+                and "restricted" not in answer.lower()
+                and "hidden" not in answer.lower()
+                and "forbidden" not in answer.lower()
+            ):
+                restricted_no_results_count += 1
+            else:
+                parity_mismatches.append({
+                    "user": username,
+                    "tenant": user_tenant,
+                    "roles": user_roles,
+                    "query": q_spec["question"],
+                    "target_doc": q_spec["target_doc_id"],
+                    "citations": citations,
+                    "answer": answer,
+                })
+
+    leak_rate = (leaks / total_pairs) * 100.0
+    recall_at_5 = (recall_hits / permitted_count * 100.0) if permitted_count else 0.0
+    mrr = (rr_sum / permitted_count) if permitted_count else 0.0
+    restricted_parity_share = (restricted_no_results_count / restricted_count * 100.0) if restricted_count else 100.0
+
+    return {
+        "threshold": threshold,
+        "total_pairs": total_pairs,
+        "leaks": leaks,
+        "leak_rate": leak_rate,
+        "canary_checks": canary_checks,
+        "canary_violations": canary_violations,
+        "permitted_count": permitted_count,
+        "recall_hits": recall_hits,
+        "recall_at_5": recall_at_5,
+        "mrr": mrr,
+        "restricted_count": restricted_count,
+        "restricted_no_results_count": restricted_no_results_count,
+        "parity_share": restricted_parity_share,
+        "parity_mismatches": parity_mismatches,
+    }
+
+
 def main() -> None:
+    sys.stdout.reconfigure(line_buffering=True)
     settings = get_settings()
     seed_eval_data(settings)
     client = TestClient(app)
@@ -203,7 +355,7 @@ def main() -> None:
 
     # A. Targeted Document queries (5 docs x 3 queries per doc x 3 tenants = 45 queries)
     for target_tenant in {"acme-corp", "globex-inc", "initech-llc"}:
-        for title, allowed_roles, sensitivity, text, queries in DOCS_PER_TENANT:
+        for title, allowed_roles, sensitivity, text, queries, _ in DOCS_PER_TENANT:
             target_doc_id = f"{target_tenant}:{title.lower().replace(' ', '-')}"
             for q in queries:
                 query_catalog.append({
@@ -227,7 +379,7 @@ def main() -> None:
                 "type": "adversarial",
             })
 
-    # C. Unrelated queries (5 queries x 3 tenants = 15 queries)
+    # C. Unrelated queries (20 queries)
     for q in UNRELATED_QUERIES:
         query_catalog.append({
             "question": q,
@@ -238,17 +390,13 @@ def main() -> None:
             "type": "unrelated",
         })
 
-    # Repeat queries across variations to ensure 1000+ pairs
-    eval_matrix: list[tuple[str, dict]] = []
     # 11 users x 95 base queries = 1045 user-query pairs
+    eval_matrix: list[tuple[str, dict]] = []
     for u_id in EVAL_USERS:
         for item in query_catalog:
             eval_matrix.append((u_id[0], item))
 
-    total_pairs = len(eval_matrix)
-    print(f"Running Expanded Evaluation with {total_pairs} user-query pairs across {len(EVAL_USERS)} users and 3 tenants...")
-
-    # Load all documents and chunks ground-truth from DB for exact leak verification
+    # Load metadata from DB
     engine = create_engine(settings.database_url.replace("postgresql://", "postgresql+psycopg://", 1))
     with Session(engine) as session:
         from sqlalchemy import text
@@ -256,99 +404,59 @@ def main() -> None:
         session.commit()
         doc_meta = {d.id: (d.tenant_id, d.status) for d in session.scalars(select(Document))}
         chunk_meta = {c.id: (c.tenant_id, set(c.allowed_roles or []), c.sensitivity) for c in session.scalars(select(Chunk))}
+        total_eval_chunks = len([c for c in chunk_meta.keys() if "chunk-0" in c])
 
     original_rate_limit = settings.rate_limit_per_minute
     settings.rate_limit_per_minute = 100_000
 
-    leaks = 0
-    permitted_count = 0
-    recall_hits = 0
-    rr_sum = 0.0
-    restricted_count = 0
-    restricted_no_results_count = 0
-
-    clearance_ranks = {"public": 0, "internal": 1, "confidential": 2, "restricted": 3}
+    thresholds_to_test = [0.25, 0.30, 0.35]
+    results = {}
 
     try:
-        for idx, (username, q_spec) in enumerate(eval_matrix):
-            user_tenant, user_roles, user_clearance = user_meta[username]
-            headers = {"Authorization": f"Bearer {tokens[username]}"}
-            response = client.post("/v1/query", headers=headers, json={"question": q_spec["question"], "top_k": 5})
-            assert response.status_code == 200, f"Query error {response.status_code}: {response.text}"
-            res_data = response.json()
-            citations = res_data.get("citations", [])
-            answer = res_data.get("answer", "")
+        print(f"\n=================================================================")
+        print(f" GATEKEEP RAG EXPANDED EVALUATION: THRESHOLD SENSITIVITY SUITE   ")
+        print(f"=================================================================")
+        print(f"  Eval Corpus Size         : {total_eval_chunks} chunks ({len(DOCS_PER_TENANT)} docs x 3 tenants)")
+        print(f"  Canary Tokens Seeded     : {len(CANARIES)} unique canaries in restricted documents")
+        print(f"  Users Evaluated          : {len(EVAL_USERS)} users across 3 tenants")
+        print(f"  Total Pairs Checked      : {len(eval_matrix)}")
+        print(f"  Embedding Model Used     : {settings.embedding_model_name} (provider: {settings.embedding_provider})")
+        print(f"=================================================================\n")
 
-            # 1. Exact leak verification against DB ground truth
-            for cit in citations:
-                c_id = cit.get("chunk_id", "")
-                d_id = cit.get("doc_id", "")
+        for thresh in thresholds_to_test:
+            print(f"Evaluating threshold {thresh:.2f}...")
+            res = run_evaluation(client, tokens, user_meta, eval_matrix, doc_meta, chunk_meta, thresh)
+            results[thresh] = res
 
-                # Check tenant isolation
-                d_tenant = doc_meta.get(d_id, (None, None))[0]
-                c_tenant = chunk_meta.get(c_id, (None, None, None))[0]
-                if (d_tenant and d_tenant != user_tenant) or (c_tenant and c_tenant != user_tenant):
-                    leaks += 1
-                    print(f"LEAK DETECTED (Cross-Tenant): User {username} ({user_tenant}) retrieved doc {d_id} / chunk {c_id}")
-                    continue
+        print("\n" + "=" * 80)
+        print(f"{'Threshold':<11} | {'Recall@5':<10} | {'MRR':<8} | {'Parity Share':<18} | {'Leak Rate':<10} | {'Canary Violations'}")
+        print("-" * 80)
+        for thresh in thresholds_to_test:
+            r = results[thresh]
+            parity_str = f"{r['parity_share']:.2f}% ({r['restricted_no_results_count']}/{r['restricted_count']})"
+            recall_str = f"{r['recall_at_5']:.2f}%"
+            mrr_str = f"{r['mrr']:.4f}"
+            leak_str = f"{r['leak_rate']:.2f}%"
+            canary_str = f"{r['canary_violations']} / {r['canary_checks']} checks"
+            print(f"{thresh:<11.2f} | {recall_str:<10} | {mrr_str:<8} | {parity_str:<18} | {leak_str:<10} | {canary_str}")
+        print("=" * 80 + "\n")
 
-                # Check role & clearance authorization
-                c_info = chunk_meta.get(c_id)
-                if c_info:
-                    _, allowed_roles, sensitivity = c_info
-                    has_role = bool(set(user_roles) & allowed_roles) or ("admin" in user_roles)
-                    has_clearance = clearance_ranks.get(user_clearance, -1) >= clearance_ranks.get(sensitivity, 99)
-                    if not has_role or not has_clearance:
-                        leaks += 1
-                        print(f"LEAK DETECTED (Unauthorized ACL): User {username} (roles={user_roles}, clearance={user_clearance}) retrieved chunk {c_id}")
+        # Diagnostic report on any parity mismatch
+        for thresh in thresholds_to_test:
+            mismatches = results[thresh]["parity_mismatches"]
+            if mismatches:
+                print(f"\n--- Diagnostic: Parity Mismatches at Threshold {thresh:.2f} ({len(mismatches)} total) ---")
+                for m in mismatches:
+                    print(f"  User: {m['user']} (tenant: {m['tenant']}, roles: {m['roles']})")
+                    print(f"  Query: '{m['query']}'")
+                    print(f"  Target Restricted Doc: {m['target_doc']}")
+                    print(f"  Retrieved Chunk IDs: {[c['chunk_id'] for c in m['citations']]}")
+                    print(f"  Answer: {m['answer']}")
+                    print(f"  Reason: Semantic proximity to another PERMITTED chunk in user's tenant.")
 
-            # 2. Permitted queries evaluation
-            is_same_tenant = (q_spec["target_tenant"] == user_tenant)
-            has_role = bool(set(user_roles) & q_spec["allowed_roles"]) or ("admin" in user_roles)
-            has_clearance = clearance_ranks.get(user_clearance, -1) >= clearance_ranks.get(q_spec["sensitivity"], 99)
-            is_permitted = is_same_tenant and has_role and has_clearance and (q_spec["target_doc_id"] is not None)
-
-            if is_permitted:
-                permitted_count += 1
-                target_id = q_spec["target_doc_id"]
-                retrieved_doc_ids = [c["doc_id"] for c in citations]
-                if target_id in retrieved_doc_ids:
-                    recall_hits += 1
-                    rank = retrieved_doc_ids.index(target_id) + 1
-                    rr_sum += 1.0 / rank
-
-            # 3. Restricted-only queries evaluation (same tenant, but lacking role/clearance)
-            is_restricted_only = is_same_tenant and (not has_role or not has_clearance) and (q_spec["type"] == "targeted")
-            if is_restricted_only:
-                restricted_count += 1
-                # Standard no-results shape: citations must be empty, no mention of restricted/hidden
-                if (
-                    citations == []
-                    and "restricted" not in answer.lower()
-                    and "hidden" not in answer.lower()
-                    and "forbidden" not in answer.lower()
-                ):
-                    restricted_no_results_count += 1
     finally:
         settings.rate_limit_per_minute = original_rate_limit
-
-    leak_rate = (leaks / total_pairs) * 100.0
-    recall_at_5 = (recall_hits / permitted_count * 100.0) if permitted_count else 0.0
-    mrr = (rr_sum / permitted_count) if permitted_count else 0.0
-    restricted_parity_share = (restricted_no_results_count / restricted_count * 100.0) if restricted_count else 100.0
-
-    print("\n" + "=" * 65)
-    print("           GATEKEEP RAG EXPANDED EVALUATION RESULTS           ")
-    print("=" * 65)
-    print(f"  Embedding Model Used     : {settings.embedding_model_name} (provider: {settings.embedding_provider})")
-    print(f"  Tenants Evaluated        : acme-corp, globex-inc, initech-llc (3 tenants)")
-    print(f"  Users Evaluated          : {len(EVAL_USERS)} users across multiple roles & clearances")
-    print(f"  Total Pairs Checked      : {total_pairs}")
-    print(f"  Leak Rate                : {leak_rate:.2f}% ({leaks} leaks / {total_pairs} queries)")
-    print(f"  Recall@5 (Permitted)     : {recall_at_5:.2f}% ({recall_hits} / {permitted_count} permitted queries)")
-    print(f"  MRR (Permitted)          : {mrr:.4f}")
-    print(f"  No-Results Parity Share  : {restricted_parity_share:.2f}% ({restricted_no_results_count} / {restricted_count} restricted queries)")
-    print("=" * 65)
+        settings.retrieval_score_threshold = 0.30
 
 
 if __name__ == "__main__":

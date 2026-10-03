@@ -9,6 +9,7 @@ class SentenceTransformerEmbeddingProvider:
     def __init__(self, model_name: str = "all-MiniLM-L6-v2") -> None:
         self.model_name = model_name
         self._model: Any = None
+        self._cache: dict[str, list[float]] = {}
 
     @property
     def model(self) -> Any:
@@ -18,8 +19,13 @@ class SentenceTransformerEmbeddingProvider:
         return self._model
 
     def embed(self, text: str) -> list[float]:
+        if text in self._cache:
+            return self._cache[text]
         vector = self.model.encode(text, normalize_embeddings=True)
-        return vector.tolist()
+        res = vector.tolist()
+        if len(self._cache) < 10000:
+            self._cache[text] = res
+        return res
 
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
         if not texts:
