@@ -19,7 +19,9 @@ class Settings(BaseSettings):
     jwt_secret: str = "change-me-in-development"
     jwt_expire_minutes: int = 30
     llm_provider: str = "mock"
-    embedding_provider: str = "hash"
+    embedding_provider: str = "sentence_transformer"
+    embedding_model_name: str = "all-MiniLM-L6-v2"
+    retrieval_score_threshold: float = 0.30
     log_raw_queries: bool = False
 
     model_config = SettingsConfigDict(env_file=".env", env_prefix="", case_sensitive=False)

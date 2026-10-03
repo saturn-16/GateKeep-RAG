@@ -6,7 +6,7 @@ from qdrant_client import QdrantClient, models
 from app.config import Settings
 from app.core.permissions import ChunkACL, build_filter
 from app.core.principal import Principal
-from app.rag.embeddings.hash import HashEmbeddingProvider
+from app.rag.embeddings.factory import get_embedding_provider
 from app.rag.vectorstore.tenant_scoped_retriever import VectorChunk
 
 
@@ -16,7 +16,7 @@ class QdrantVectorStore:
     def __init__(self, settings: Settings, client: QdrantClient | None = None) -> None:
         self.settings = settings
         self.client = client or QdrantClient(url=settings.qdrant_url)
-        self.embedder = HashEmbeddingProvider(settings.qdrant_vector_size)
+        self.embedder = get_embedding_provider(settings)
         self.ensure_collection()
 
     def ensure_collection(self) -> None:
@@ -56,7 +56,15 @@ class QdrantVectorStore:
             min_should=models.MinShould(conditions=should, min_count=filter_spec["minimum_should_match"])
             if should and "admin" not in principal.roles else None,
         )
-        response = self.client.query_points(collection_name=self.settings.qdrant_collection, query=self.embedder.embed(query), query_filter=query_filter, limit=min(top_k, 20), with_payload=True).points
+        score_threshold = self.settings.retrieval_score_threshold if self.settings.embedding_provider != "hash" else None
+        response = self.client.query_points(
+            collection_name=self.settings.qdrant_collection,
+            query=self.embedder.embed(query),
+            query_filter=query_filter,
+            limit=min(top_k, 20),
+            score_threshold=score_threshold,
+            with_payload=True,
+        ).points
         chunks = [self._chunk(point) for point in response if isinstance(point.payload, dict)]
         if self.settings.embedding_provider == "hash":
             query_terms = {term.lower().strip(".,;:!?\"'") for term in query.split() if term}
