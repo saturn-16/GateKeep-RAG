@@ -57,7 +57,12 @@ class QdrantVectorStore:
             if should and "admin" not in principal.roles else None,
         )
         response = self.client.query_points(collection_name=self.settings.qdrant_collection, query=self.embedder.embed(query), query_filter=query_filter, limit=min(top_k, 20), with_payload=True).points
-        return [self._chunk(point) for point in response if isinstance(point.payload, dict)]
+        chunks = [self._chunk(point) for point in response if isinstance(point.payload, dict)]
+        if self.settings.embedding_provider == "hash":
+            query_terms = {term.lower().strip(".,;:!?\"'") for term in query.split() if term}
+            if query_terms:
+                chunks = [c for c in chunks if query_terms & {t.strip(".,;:!?\"'") for t in c.text.lower().split()}]
+        return chunks
 
     def update_document_acl(self, tenant_id: str, document_id: str, allowed_roles: set[str], allowed_users: set[str], sensitivity: str) -> None:
         self.client.set_payload(collection_name=self.settings.qdrant_collection, payload={"allowed_roles": sorted(allowed_roles), "allowed_users": sorted(allowed_users), "sensitivity": sensitivity, "sensitivity_level": {"public": 0, "internal": 1, "confidential": 2, "restricted": 3}[sensitivity]}, points=models.Filter(must=[models.FieldCondition(key="tenant_id", match=models.MatchValue(value=tenant_id)), models.FieldCondition(key="doc_id", match=models.MatchValue(value=document_id))]), wait=True)
