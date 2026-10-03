@@ -43,7 +43,7 @@ class ServiceState:
 
 def create_demo_state() -> ServiceState:
     settings = get_settings()
-    llm = OllamaLLM() if settings.llm_provider == "ollama" else MockLLM()
+    llm = OllamaLLM(model=settings.llm_model, url=settings.llm_url) if settings.llm_provider == "ollama" else MockLLM()
     users = {
         "alice": User("alice", "acme-corp", hash_password("alice"), frozenset({"admin"}), "restricted"),
         "bob": User("bob", "acme-corp", hash_password("bob"), frozenset({"hr"}), "restricted"),
