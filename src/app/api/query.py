@@ -31,12 +31,12 @@ def me(user: User = Depends(current_user)) -> dict[str, object]:
 def query(request: QueryRequest, user: User = Depends(current_user), identity: Principal = Depends(principal), db: Session | None = Depends(get_runtime_db)) -> dict[str, object]:
     chunks = state.retriever.search(identity, request.question, request.top_k)
     if db is not None and chunks:
-        source_chunks = {record.id: record for record in db.scalars(select(Chunk).where(Chunk.id.in_([chunk.acl.chunk_id for chunk in chunks])))}
+        source_chunks = {record.id: record for record in db.scalars(select(Chunk).where(Chunk.id.in_([chunk.acl.chunk_id for chunk in chunks]), Chunk.tenant_id == identity.tenant_id))}
         verified = []
         for chunk in chunks:
             source = source_chunks.get(chunk.acl.chunk_id)
             acl = ChunkACL(source.tenant_id, source.id, frozenset(source.allowed_roles or []), frozenset(source.allowed_users or []), source.sensitivity) if source else chunk.acl
-            document = db.get(Document, source.document_id) if source else None
+            document = db.scalar(select(Document).where(Document.id == source.document_id, Document.tenant_id == identity.tenant_id)) if source else None
             if source is None or document is None or document.status != "ready" or not can_access(identity, acl):
                 write_audit(state, user, "security_alert", {"chunk_id": chunk.acl.chunk_id, "reason": "post_retrieval_acl_mismatch"}, db)
                 continue

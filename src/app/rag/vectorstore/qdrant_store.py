@@ -32,7 +32,8 @@ class QdrantVectorStore:
     def upsert(self, chunks: list[VectorChunk]) -> None:
         points = []
         for chunk in chunks:
-            points.append(models.PointStruct(id=str(uuid5(NAMESPACE_URL, chunk.acl.chunk_id)), vector=self.embedder.embed(chunk.text), payload={
+            point_id = str(uuid5(NAMESPACE_URL, f"{chunk.acl.tenant_id}:{chunk.doc_id}:{chunk.acl.chunk_id}"))
+            points.append(models.PointStruct(id=point_id, vector=self.embedder.embed(chunk.text), payload={
                 "tenant_id": chunk.acl.tenant_id,
                 "chunk_id": chunk.acl.chunk_id,
                 "doc_id": chunk.doc_id,
