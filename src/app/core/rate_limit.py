@@ -1,4 +1,6 @@
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
+from threading import Lock
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
@@ -25,3 +27,19 @@ class DatabaseRateLimiter:
         self.session.add(RateLimitEvent(key=key, created_at=now))
         self.session.commit()
         return True
+
+
+class InMemoryRateLimiter:
+    def __init__(self) -> None:
+        self._events: dict[str, list[datetime]] = defaultdict(list)
+        self._lock = Lock()
+
+    def allow(self, key: str, limit: int, window_seconds: int = 60) -> bool:
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(seconds=window_seconds)
+        with self._lock:
+            self._events[key] = [event for event in self._events[key] if event >= cutoff]
+            if len(self._events[key]) >= limit:
+                return False
+            self._events[key].append(now)
+            return True

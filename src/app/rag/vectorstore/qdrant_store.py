@@ -57,6 +57,12 @@ class QdrantVectorStore:
         response = self.client.query_points(collection_name=self.settings.qdrant_collection, query=self.embedder.embed(query), query_filter=query_filter, limit=min(top_k, 20), with_payload=True).points
         return [self._chunk(point) for point in response if isinstance(point.payload, dict)]
 
+    def update_document_acl(self, tenant_id: str, document_id: str, allowed_roles: set[str], allowed_users: set[str], sensitivity: str) -> None:
+        self.client.set_payload(collection_name=self.settings.qdrant_collection, payload={"allowed_roles": sorted(allowed_roles), "allowed_users": sorted(allowed_users), "sensitivity": sensitivity, "sensitivity_level": {"public": 0, "internal": 1, "confidential": 2, "restricted": 3}[sensitivity]}, points=models.Filter(must=[models.FieldCondition(key="tenant_id", match=models.MatchValue(value=tenant_id)), models.FieldCondition(key="doc_id", match=models.MatchValue(value=document_id))]), wait=True)
+
+    def delete_document(self, tenant_id: str, document_id: str) -> None:
+        self.client.delete(collection_name=self.settings.qdrant_collection, points_selector=models.FilterSelector(filter=models.Filter(must=[models.FieldCondition(key="tenant_id", match=models.MatchValue(value=tenant_id)), models.FieldCondition(key="doc_id", match=models.MatchValue(value=document_id))])), wait=True)
+
     @staticmethod
     def _condition(condition: dict[str, Any]) -> dict[str, Any]:
         match = condition.get("match")

@@ -11,6 +11,7 @@ from app.core.security import hash_password, verify_password
 from app.rag.llm import MockLLM
 from app.rag.vectorstore.tenant_scoped_retriever import TenantScopedRetriever, VectorChunk
 from app.core.permissions import ChunkACL
+from app.core.rate_limit import InMemoryRateLimiter
 
 
 @dataclass(slots=True)
@@ -31,6 +32,7 @@ class ServiceState:
     retriever: TenantScopedRetriever = field(default_factory=TenantScopedRetriever)
     llm: MockLLM = field(default_factory=MockLLM)
     vector_store: QdrantVectorStore | None = None
+    limiter: InMemoryRateLimiter = field(default_factory=InMemoryRateLimiter)
 
     def audit(self, user: User, action: str, details: dict[str, object]) -> AuditRecord:
         previous = next((record.row_hash for record in reversed(self.audits) if record.tenant_id == user.tenant_id), "")

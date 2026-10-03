@@ -5,6 +5,7 @@ Run with Docker services and RUN_REAL_STACK=1 after `alembic upgrade head`.
 
 import os
 from datetime import datetime, timezone
+from uuid import uuid4
 
 import pytest
 pytest.importorskip("qdrant_client")
@@ -38,6 +39,7 @@ def test_real_qdrant_and_postgres_isolation() -> None:
     with engine.begin() as connection:
         assert connection.execute(text("SELECT to_regclass('public.audit_logs')")).scalar() == "audit_logs"
         connection.execute(text("INSERT INTO tenants (id, name) VALUES ('acme', 'Acme Integration') ON CONFLICT (id) DO NOTHING"))
-        connection.execute(text("INSERT INTO audit_logs (id, tenant_id, user_id, action, details, timestamp, prev_hash, row_hash) VALUES (:id, :tenant, :user, 'query', '{}'::json, :timestamp, '', 'integration-hash')"), {"id": "integration-real-stack", "tenant": "acme", "user": "dave", "timestamp": datetime.now(timezone.utc)})
+        audit_id = f"integration-{uuid4()}"
+        connection.execute(text("INSERT INTO audit_logs (id, tenant_id, user_id, action, details, timestamp, prev_hash, row_hash) VALUES (:id, :tenant, :user, 'query', '{}'::json, :timestamp, '', 'integration-hash')"), {"id": audit_id, "tenant": "acme", "user": "dave", "timestamp": datetime.now(timezone.utc)})
         with pytest.raises(Exception):
-            connection.execute(text("UPDATE audit_logs SET action='tampered' WHERE id='integration-real-stack'"))
+            connection.execute(text("UPDATE audit_logs SET action='tampered' WHERE id=:id"), {"id": audit_id})

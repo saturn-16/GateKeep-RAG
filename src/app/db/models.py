@@ -44,6 +44,7 @@ class Document(Base):
     source: Mapped[str] = mapped_column(String(500))
     created_by: Mapped[str] = mapped_column(String(100))
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    repair_required: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
 
 class Chunk(Base):

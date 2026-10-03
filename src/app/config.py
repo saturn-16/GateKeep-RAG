@@ -13,6 +13,8 @@ class Settings(BaseSettings):
     vector_backend: str = "memory"
     persistence_backend: str = "memory"
     rate_limit_per_minute: int = 60
+    login_max_attempts: int = 5
+    login_window_seconds: int = 300
     upload_max_bytes: int = 10_000_000
     jwt_secret: str = "change-me-in-development"
     jwt_expire_minutes: int = 30
