@@ -101,20 +101,23 @@ async def ingest_file(background_tasks: BackgroundTasks, file: UploadFile = File
     _require_write(user)
     try:
         data = await read_upload(file, get_settings().upload_max_bytes)
-        text = parse_document(file.filename or title, file.content_type, data)
-    except (ValueError, UnicodeDecodeError) as exc:
+    except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if not text:
-        raise HTTPException(status_code=400, detail="document contains no extractable text")
     roles = {role.strip() for role in allowed_roles.split(",") if role.strip()}
     if not roles or not roles <= {"admin", "hr", "finance", "engineering", "legal", "employee", "viewer"}:
         raise HTTPException(status_code=400, detail="unknown or empty ACL role")
+    if sensitivity not in CLEARANCE_LEVELS:
+        raise HTTPException(status_code=400, detail="invalid sensitivity level")
+    if CLEARANCE_LEVELS[sensitivity] > CLEARANCE_LEVELS.get(user.clearance, -1):
+        raise HTTPException(status_code=403, detail="cannot grant above own clearance")
+    if "admin" not in user.roles and not roles <= user.roles:
+        raise HTTPException(status_code=403, detail="cannot grant roles outside own authority")
     document_id = str(uuid.uuid4())
     state.document_status[document_id] = {"status": "pending", "title": title, "tenant_id": user.tenant_id}
     if db is not None:
         db.add(Document(id=document_id, tenant_id=user.tenant_id, title=title, status="pending", source=file.filename or title, created_by=user.user_id))
         db.commit()
-    background_tasks.add_task(_complete_file_ingest, document_id, user, title, text, roles, sensitivity)
+    background_tasks.add_task(_complete_file_ingest, document_id, user, title, file.filename or title, file.content_type, data, roles, sensitivity)
     return {"id": document_id, "status": "pending"}
 
 
@@ -187,22 +190,11 @@ def delete_document(document_id: str, user: User = Depends(current_user), db: Se
         raise HTTPException(status_code=503, detail="document delete requires repair") from exc
 
 
-def _complete_file_ingest(document_id: str, user: User, title: str, text: str, roles: set[str], sensitivity: str) -> None:
+def _complete_file_ingest(document_id: str, user: User, title: str, filename: str, content_type: str | None, data: bytes, roles: set[str], sensitivity: str) -> None:
     state.document_status[document_id] = {"status": "processing", "title": title, "tenant_id": user.tenant_id}
-    chunks = chunk_text(text)
-    chunk_data = [(chunk, str(uuid.uuid4())) for chunk in chunks]
-    values = [
-        VectorChunk(
-            ChunkACL(user.tenant_id, chunk_id, frozenset(roles), sensitivity=sensitivity),
-            chunk.text,
-            0.5,
-            document_id,
-            "ready",
-        )
-        for chunk, chunk_id in chunk_data
-    ]
     from app.config import get_settings
     from app.db.session import SessionLocal
+
     session = SessionLocal() if get_settings().persistence_backend == "postgres" else None
     try:
         if session is not None:
@@ -210,6 +202,21 @@ def _complete_file_ingest(document_id: str, user: User, title: str, text: str, r
             if record is not None:
                 record.status = "processing"
                 session.commit()
+        text = parse_document(filename, content_type, data)
+        if not text:
+            raise ValueError("document contains no extractable text")
+        chunks = chunk_text(text)
+        chunk_data = [(chunk, str(uuid.uuid4())) for chunk in chunks]
+        values = [
+            VectorChunk(
+                ChunkACL(user.tenant_id, chunk_id, frozenset(roles), sensitivity=sensitivity),
+                chunk.text,
+                0.5,
+                document_id,
+                "ready",
+            )
+            for chunk, chunk_id in chunk_data
+        ]
         if state.vector_store is not None:
             state.vector_store.upsert(values)
         else:

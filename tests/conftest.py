@@ -2,7 +2,7 @@ import os
 import pytest
 
 
-@pytest.fixture(autouse=True, scope="session")
+@pytest.fixture(autouse=True, scope="function")
 def clear_rate_limit_events():
     if os.getenv("PERSISTENCE_BACKEND") == "postgres":
         try:
