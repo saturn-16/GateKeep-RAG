@@ -57,14 +57,37 @@ def ingest(document: TextDocument, user: User = Depends(current_user), db: Sessi
     if not document.allowed_roles <= {"admin", "hr", "finance", "engineering", "legal", "employee", "viewer"}:
         raise HTTPException(status_code=400, detail="unknown role in ACL")
     chunks = chunk_text(document.text)
-    for chunk in chunks:
-        state.retriever._chunks.append(VectorChunk(ChunkACL(user.tenant_id, chunk.chunk_id, frozenset(document.allowed_roles), sensitivity=document.sensitivity), chunk.text, 0.5, document.title))
-    audit = write_audit(state, user, "ingest", {"title": document.title, "chunks": len(chunks)}, db)
-    return {"status": "ready", "chunks": len(chunks), "audit_id": audit.id}
+    document_id = f"{user.tenant_id}:{uuid.uuid4()}"
+    if db is None:
+        values = [VectorChunk(ChunkACL(user.tenant_id, f"{document_id}:{chunk.chunk_id}", frozenset(document.allowed_roles), sensitivity=document.sensitivity), chunk.text, 0.5, document_id, "ready") for chunk in chunks]
+        state.retriever._chunks.extend(values)
+        audit = write_audit(state, user, "ingest", {"document_id": document_id, "title": document.title, "chunks": len(chunks)}, db)
+        return {"id": document_id, "status": "ready", "chunks": len(chunks), "audit_id": audit.id}
+    record = Document(id=document_id, tenant_id=user.tenant_id, title=document.title, status="processing", source="text", created_by=user.user_id)
+    db.add(record)
+    db.commit()
+    values = [VectorChunk(ChunkACL(user.tenant_id, f"{document_id}:{chunk.chunk_id}", frozenset(document.allowed_roles), sensitivity=document.sensitivity), chunk.text, 0.5, document_id, "ready") for chunk in chunks]
+    try:
+        if state.vector_store is not None:
+            state.vector_store.upsert(values)
+        for chunk, value in zip(chunks, values):
+            db.add(Chunk(id=value.acl.chunk_id, tenant_id=user.tenant_id, document_id=document_id, text=chunk.text, content_hash=chunk.content_hash, allowed_roles=sorted(document.allowed_roles), allowed_users=[], sensitivity=document.sensitivity, page=chunk.page))
+        record.status = "ready"
+        audit = write_audit(state, user, "ingest", {"document_id": document_id, "title": document.title, "chunks": len(chunks)}, db)
+        db.commit()
+        return {"id": document_id, "status": "ready", "chunks": len(chunks), "audit_id": audit.id}
+    except Exception as exc:
+        db.rollback()
+        record = db.get(Document, document_id)
+        if record is not None:
+            record.status = "failed"
+            record.error = str(exc)
+            db.commit()
+        raise HTTPException(status_code=503, detail="document ingestion failed") from exc
 
 
 @router.post("")
-async def ingest_file(background_tasks: BackgroundTasks, file: UploadFile = File(...), title: str = Form(...), allowed_roles: str = Form(...), sensitivity: str = Form("internal"), user: User = Depends(current_user)) -> dict[str, str]:
+async def ingest_file(background_tasks: BackgroundTasks, file: UploadFile = File(...), title: str = Form(...), allowed_roles: str = Form(...), sensitivity: str = Form("internal"), user: User = Depends(current_user), db: Session | None = Depends(get_runtime_db)) -> dict[str, str]:
     _require_write(user)
     try:
         data = await read_upload(file, get_settings().upload_max_bytes)
@@ -78,6 +101,9 @@ async def ingest_file(background_tasks: BackgroundTasks, file: UploadFile = File
         raise HTTPException(status_code=400, detail="unknown or empty ACL role")
     document_id = f"pending-{uuid.uuid4()}"
     state.document_status[document_id] = {"status": "pending", "title": title}
+    if db is not None:
+        db.add(Document(id=document_id, tenant_id=user.tenant_id, title=title, status="pending", source=file.filename or title, created_by=user.user_id))
+        db.commit()
     background_tasks.add_task(_complete_file_ingest, document_id, user, title, text, roles, sensitivity)
     return {"id": document_id, "status": "pending"}
 
@@ -154,19 +180,41 @@ def delete_document(document_id: str, user: User = Depends(current_user), db: Se
 def _complete_file_ingest(document_id: str, user: User, title: str, text: str, roles: set[str], sensitivity: str) -> None:
     state.document_status[document_id] = {"status": "processing", "title": title}
     chunks = chunk_text(text)
-    values = [VectorChunk(ChunkACL(user.tenant_id, f"{document_id}:{chunk.chunk_id}", frozenset(roles), sensitivity=sensitivity), chunk.text, 0.5, document_id) for chunk in chunks]
-    if state.vector_store is not None:
-        state.vector_store.upsert(values)
-    else:
-        state.retriever._chunks.extend(values)
-    state.document_status[document_id] = {"status": "ready", "title": title, "chunks": str(len(values))}
+    values = [VectorChunk(ChunkACL(user.tenant_id, f"{document_id}:{chunk.chunk_id}", frozenset(roles), sensitivity=sensitivity), chunk.text, 0.5, document_id, "ready") for chunk in chunks]
     from app.config import get_settings
-    if get_settings().persistence_backend == "postgres":
-        from app.db.session import SessionLocal
-        with SessionLocal() as session:
+    from app.db.session import SessionLocal
+    session = SessionLocal() if get_settings().persistence_backend == "postgres" else None
+    try:
+        if session is not None:
+            record = session.get(Document, document_id)
+            record.status = "processing"
+            session.commit()
+        if state.vector_store is not None:
+            state.vector_store.upsert(values)
+        else:
+            state.retriever._chunks.extend(values)
+        if session is not None:
+            for chunk, value in zip(chunks, values):
+                session.add(Chunk(id=value.acl.chunk_id, tenant_id=user.tenant_id, document_id=document_id, text=chunk.text, content_hash=chunk.content_hash, allowed_roles=sorted(roles), allowed_users=[], sensitivity=sensitivity, page=chunk.page))
+            record = session.get(Document, document_id)
+            record.status = "ready"
             write_audit(state, user, "ingest", {"document_id": document_id, "chunks": len(values), "status": "ready"}, session)
-    else:
-        write_audit(state, user, "ingest", {"document_id": document_id, "chunks": len(values), "status": "ready"})
+            session.commit()
+        else:
+            write_audit(state, user, "ingest", {"document_id": document_id, "chunks": len(values), "status": "ready"})
+        state.document_status[document_id] = {"status": "ready", "title": title, "chunks": str(len(values))}
+    except Exception as exc:
+        if session is not None:
+            session.rollback()
+            record = session.get(Document, document_id)
+            if record is not None:
+                record.status = "failed"
+                record.error = str(exc)
+                session.commit()
+        state.document_status[document_id] = {"status": "failed", "title": title}
+    finally:
+        if session is not None:
+            session.close()
 
 
 @router.get("/{document_id}")

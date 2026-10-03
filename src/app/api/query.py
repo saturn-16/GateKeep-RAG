@@ -7,7 +7,7 @@ from app.api.state import User, question_hash, state
 from app.audit.service import write_audit
 from app.core.principal import Principal
 from app.core.permissions import ChunkACL, can_access
-from app.db.models import Chunk
+from app.db.models import Chunk, Document
 from app.rag.generation.output_guard import guard_output
 from app.rag.generation.prompt import build_prompt
 from sqlalchemy import select
@@ -36,7 +36,8 @@ def query(request: QueryRequest, user: User = Depends(current_user), identity: P
         for chunk in chunks:
             source = source_chunks.get(chunk.acl.chunk_id)
             acl = ChunkACL(source.tenant_id, source.id, frozenset(source.allowed_roles or []), frozenset(source.allowed_users or []), source.sensitivity) if source else chunk.acl
-            if source is None or not can_access(identity, acl):
+            document = db.get(Document, source.document_id) if source else None
+            if source is None or document is None or document.status != "ready" or not can_access(identity, acl):
                 write_audit(state, user, "security_alert", {"chunk_id": chunk.acl.chunk_id, "reason": "post_retrieval_acl_mismatch"}, db)
                 continue
             verified.append(chunk)

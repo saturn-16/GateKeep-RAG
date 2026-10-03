@@ -26,7 +26,7 @@ class QdrantVectorStore:
                 collection_name=self.settings.qdrant_collection,
                 vectors_config=models.VectorParams(size=self.settings.qdrant_vector_size, distance=models.Distance.COSINE),
             )
-        for field_name, schema in (("tenant_id", models.PayloadSchemaType.KEYWORD), ("allowed_roles", models.PayloadSchemaType.KEYWORD), ("allowed_users", models.PayloadSchemaType.KEYWORD), ("sensitivity_level", models.PayloadSchemaType.INTEGER)):
+        for field_name, schema in (("tenant_id", models.PayloadSchemaType.KEYWORD), ("allowed_roles", models.PayloadSchemaType.KEYWORD), ("allowed_users", models.PayloadSchemaType.KEYWORD), ("sensitivity_level", models.PayloadSchemaType.INTEGER), ("document_status", models.PayloadSchemaType.KEYWORD)):
             self.client.create_payload_index(collection_name=self.settings.qdrant_collection, field_name=field_name, field_schema=schema)
 
     def upsert(self, chunks: list[VectorChunk]) -> None:
@@ -36,6 +36,7 @@ class QdrantVectorStore:
                 "tenant_id": chunk.acl.tenant_id,
                 "chunk_id": chunk.acl.chunk_id,
                 "doc_id": chunk.doc_id,
+                "document_status": chunk.document_status,
                 "text": chunk.text,
                 "allowed_roles": sorted(chunk.acl.allowed_roles),
                 "allowed_users": sorted(chunk.acl.allowed_users),
@@ -48,6 +49,7 @@ class QdrantVectorStore:
     def search(self, principal: Principal, query: str, top_k: int) -> list[VectorChunk]:
         filter_spec = build_filter(principal)
         must = [models.FieldCondition(key=condition["key"], **self._condition(condition)) for condition in filter_spec["must"]]
+        must.append(models.FieldCondition(key="document_status", match=models.MatchValue(value="ready")))
         should = [models.FieldCondition(key=condition["key"], **self._condition(condition)) for condition in filter_spec.get("should", [])]
         query_filter = models.Filter(
             must=must,
@@ -77,4 +79,4 @@ class QdrantVectorStore:
     def _chunk(point: Any) -> VectorChunk:
         payload = point.payload
         acl = ChunkACL(payload["tenant_id"], payload["chunk_id"], frozenset(payload.get("allowed_roles", [])), frozenset(payload.get("allowed_users", [])), payload.get("sensitivity", "restricted"))
-        return VectorChunk(acl, payload.get("text", ""), float(point.score or 0), payload.get("doc_id", ""))
+        return VectorChunk(acl, payload.get("text", ""), float(point.score or 0), payload.get("doc_id", ""), payload.get("document_status", "ready"))

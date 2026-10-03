@@ -8,7 +8,7 @@ from app.audit.hashchain import AuditRecord, make_record
 from app.config import get_settings
 from app.core.principal import Principal
 from app.core.security import hash_password, verify_password
-from app.rag.llm import MockLLM
+from app.rag.llm import MockLLM, OllamaLLM
 from app.rag.vectorstore.tenant_scoped_retriever import TenantScopedRetriever, VectorChunk
 from app.core.permissions import ChunkACL
 from app.core.rate_limit import InMemoryRateLimiter
@@ -43,6 +43,7 @@ class ServiceState:
 
 def create_demo_state() -> ServiceState:
     settings = get_settings()
+    llm = OllamaLLM() if settings.llm_provider == "ollama" else MockLLM()
     users = {
         "alice": User("alice", "acme-corp", hash_password("alice"), frozenset({"admin"}), "restricted"),
         "bob": User("bob", "acme-corp", hash_password("bob"), frozenset({"hr"}), "restricted"),
@@ -59,8 +60,8 @@ def create_demo_state() -> ServiceState:
 
         vector_store = QdrantVectorStore(settings)
         vector_store.upsert(chunks)
-        return ServiceState(users=users, retriever=TenantScopedRetriever(backend=vector_store), vector_store=vector_store)
-    return ServiceState(users=users, retriever=TenantScopedRetriever(chunks))
+        return ServiceState(users=users, retriever=TenantScopedRetriever(backend=vector_store), vector_store=vector_store, llm=llm)
+    return ServiceState(users=users, retriever=TenantScopedRetriever(chunks), llm=llm)
 
 
 state = create_demo_state()
