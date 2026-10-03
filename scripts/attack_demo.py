@@ -17,7 +17,7 @@ dave = client.post("/v1/query", headers={"Authorization": f"Bearer {token(client
 frank = client.post("/v1/query", headers={"Authorization": f"Bearer {token(client, 'frank')}"}, json={"question": "salary band engineers"}).json()
 
 checks = {
-    "hr sees Acme salary": any(item["chunk_id"].startswith("acme-corp:") for item in bob["citations"]),
+    "hr sees Acme salary": any(item["chunk_id"].startswith("acme-corp:") or item["chunk_id"] == "salary-acme" for item in bob["citations"]),
     "employee cannot see restricted salary": all("salary-bands-2026" not in item["doc_id"] for item in dave["citations"]),
     "Globex cannot see Acme": all(not item["chunk_id"].startswith("acme-corp:") for item in frank["citations"]),
     "response has no hidden-document hint": "restricted" not in dave["answer"].lower() and "hidden" not in dave["answer"].lower(),

@@ -20,7 +20,7 @@ switch ($Task) {
         $env:RUN_REAL_STACK = '1'
         $env:PERSISTENCE_BACKEND = 'postgres'
         $env:VECTOR_BACKEND = 'qdrant'
-        & $Python -m pytest -q tests/integration/test_real_stack.py tests/integration/test_live_security.py tests/integration/test_audit_concurrency.py
+        & $Python -m pytest -q tests/integration/
         break
     }
     default {
