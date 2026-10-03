@@ -49,7 +49,8 @@ jobs:
           VECTOR_BACKEND: qdrant
           RUN_REAL_STACK: "1"
       - run: python -m compileall -q src tests
-      - run: pip-audit --skip-editable
+      - run: python -m pip freeze | grep -v '^-e ' > audit-requirements.txt
+      - run: pip-audit -r audit-requirements.txt --no-deps
       - uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
