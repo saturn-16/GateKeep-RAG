@@ -63,39 +63,42 @@ flowchart TD
 
 ## Test & Evaluation Results
 
-All metrics are proven against the live PostgreSQL 16 and Qdrant 1.19.1 services:
+All metrics are proven against the live PostgreSQL 16 and Qdrant 1.19.1 services on an expanded multi-tenant corporate corpus:
 
-| Check / Metric | Result | Verification Evidence |
+| Check / Metric | Result | Verification Evidence & Scope |
 |---|---|---|
-| **Live Integration & Security Suite** | **31 passed, 0 skipped, 0 failed** (100% pass) | `pytest -v` across real stack (`RUN_REAL_STACK=1`, `PERSISTENCE_BACKEND=postgres`) |
-| **Tenants Evaluated** | **3 distinct tenants** (`acme-corp`, `globex-inc`, `initech-llc`) | `scripts/run_eval.py` |
-| **Personas & Clearances Evaluated** | **11 users** across admin, HR, finance, engineering, employee | `scripts/run_eval.py` |
-| **User-Query Pairs Checked** | **1,045 pairs** (including prompt injection & adversarial probes) | `scripts/run_eval.py` |
-| **Cross-Tenant Leak Rate** | **0.00%** (0 leaks / 1,045 queries) | `scripts/run_eval.py` |
-| **Canary Token Violations** | **0 / 5,415 checks** (0 violations across all unauthorized pairs) | `scripts/run_eval.py` (6 unique canary tokens in restricted docs) |
-| **Recall@5 (Permitted Queries)** | **92.86%** (78 / 84 permitted queries) | `scripts/run_eval.py` |
-| **MRR (Mean Reciprocal Rank)** | **0.8750** | `scripts/run_eval.py` |
+| **Live Integration & Security Suite** | **32 passed, 0 skipped, 0 failed** (100% pass) | `pytest -v` across real stack (`RUN_REAL_STACK=1`, `PERSISTENCE_BACKEND=postgres`) |
+| **Corpus Scale & Domain Breadth** | **246 chunks** (30 documents x 3 tenants) | 3 distinct tenants (`acme-corp`, `globex-inc`, `initech-llc`) |
+| **Personas & Clearances Evaluated** | **11 users** across admin, HR, finance, engineering, employee | `scripts/run_eval.py` (Corpus: 246 chunks) |
+| **User-Query Pairs Checked** | **2,860 pairs** (targeted, adversarial, near-duplicates, out-of-domain) | `scripts/run_eval.py` (Corpus: 246 chunks) |
+| **Cross-Tenant Leak Rate** | **0.00%** (0 leaks / 2,860 queries) | `scripts/run_eval.py` (Corpus: 246 chunks) |
+| **Canary Token Violations** | **0 / 66,300 checks** (0 violations across all unauthorized pairs) | Inspects LLM prompt context, generated answer, and citation metadata (Corpus: 246 chunks) |
+| **Counterfactual Invariance Rate** | **100.00%** (1,300 unauthorized pairs checked, 0 mismatches) | Responses identical with restricted documents present vs completely removed (`tests/security/test_counterfactual.py`) |
+| **Recall@5 (Permitted Queries)** | **100.00%** at threshold 0.35 (99.18% at 0.40) | `scripts/run_eval.py` (Corpus: 246 chunks) |
+| **MRR (Mean Reciprocal Rank)** | **0.9949** at threshold 0.35 (0.9887 at 0.40) | `scripts/run_eval.py` (Corpus: 246 chunks) |
 | **Default Embedding Model** | `all-MiniLM-L6-v2` (384 dimensions, sentence-transformers) | `app/rag/embeddings/sentence_transformer.py` |
 | **Cryptographic Audit Integrity** | **PASSED** (`/v1/audit/verify` validated) | `tests/integration/test_audit_concurrency.py`, `tests/integration/test_audit_completeness.py` |
-| **Dependency & Secret Scans** | **0 vulnerabilities, 0 secret leaks** | `pip-audit`, `gitleaks` (32 commits scanned) |
+| **Dependency & Secret Scans** | **0 vulnerabilities, 0 secret leaks** | `pip-audit`, `gitleaks` (CI automated scan) |
 
-### Threshold Sensitivity Analysis (Eval Corpus: 18 chunks, 1,045 query pairs)
+### Threshold Sensitivity Analysis (Eval Corpus: 246 chunks, 2,860 query pairs)
 
 > [!NOTE]
-> The similarity score threshold was tuned on the demo corpus using `all-MiniLM-L6-v2`. At `threshold = 0.35`, exact no-results response parity reaches 100.00% (81/81) while preserving 92.86% Recall@5 and 0.8750 MRR for permitted queries.
+> The similarity score threshold was calibrated on this 246-chunk corpus using `all-MiniLM-L6-v2`. Higher thresholds increase restricted query parity share by filtering cross-document semantic overlap, with a measured trade-off on Recall@5 for queries with phrasing divergence.
 
-| Threshold | Recall@5 | MRR | Restricted Parity Share | Leak Rate | Canary Violations | Behavioral Profile |
-|---|---|---|---|---|---|---|
-| **0.25** | 92.86% | 0.8750 | 83.95% (68 / 81) | 0.00% | 0 / 5,415 checks | Broad semantic matching; loose cross-document overlap |
-| **0.30** | 92.86% | 0.8750 | 98.77% (80 / 81) | 0.00% | 0 / 5,415 checks | Default; 1 query matched permitted handbook chunk |
-| **0.35** | 92.86% | 0.8750 | 100.00% (81 / 81) | 0.00% | 0 / 5,415 checks | Calibrated; zero cross-document false positives |
+| Similarity Threshold | Recall@5 (Permitted) | MRR (Permitted) | Restricted Parity Share | Cross-Tenant Leak Rate | Canary Violations | Behavioral Profile |
+|:---:|:---:|:---:|:---:|:---:|:---:|---|
+| **0.25** | 100.00% | 0.9949 | 29.33% (83 / 283) | 0.00% | 0 / 66,300 checks | Broad semantic matching; loose cross-document overlap across permitted internal topics |
+| **0.30** | 100.00% | 0.9949 | 47.70% (135 / 283) | 0.00% | 0 / 66,300 checks | Moderate semantic filtering; filters unrelated internal documents |
+| **0.35** | 100.00% | 0.9949 | 73.14% (207 / 283) | 0.00% | 0 / 66,300 checks | Balanced baseline; optimal Recall@5 with increased parity |
+| **0.40** | 99.18% | 0.9887 | 89.40% (253 / 283) | 0.00% | 0 / 66,300 checks | Calibrated high-parity operating point; minor recall reduction on phrasing edge cases |
+| **0.45** | 98.15% | 0.9784 | 93.99% (266 / 283) | 0.00% | 0 / 66,300 checks | Strict matching; high parity with selective retrieval on exact terminology |
 
 ---
 
-## Seeded Personas (Demo-Only Credentials)
+## Seeded Personas & Credential Notice
 
 > [!WARNING]
-> **Demo-Only Credentials**: The credentials below (`alice`/`alice`, `bob`/`bob`, etc.) are seeded strictly for local sandbox demonstration, test suites, and evaluation. Never deploy default or username-identical passwords in a staging or production environment.
+> **Demo-Only Credentials & Secrets Replacement**: All personas below (`alice`/`alice`, `bob`/`bob`, etc.) and default service credentials (such as `gatekeep:gatekeep` and default JWT secrets) are seeded strictly for local sandbox demonstration, test suites, and offline evaluation. In any staging or production deployment, default credentials and static database passwords must be replaced by strong, dynamically provisioned secrets managed via a dedicated secrets store (such as AWS Secrets Manager or HashiCorp Vault).
 
 | Username | Password | Tenant | Roles | Clearance | Description |
 |---|---|---|---|---|---|
