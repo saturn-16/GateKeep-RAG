@@ -11,6 +11,7 @@ class VectorChunk:
     text: str
     score: float = 0.0
     doc_id: str = ""
+    document_status: str = "ready"
 
 
 class TenantContextRequired(RuntimeError):
@@ -37,7 +38,7 @@ class TenantScopedRetriever:
         query_terms = {term.lower() for term in query.split() if term}
         filtered = [
             chunk for chunk in self._chunks
-            if can_access(principal, chunk.acl)
+            if chunk.document_status == "ready" and can_access(principal, chunk.acl)
         ]
         verified = [
             chunk for chunk in filtered

@@ -6,7 +6,7 @@ from qdrant_client import QdrantClient, models
 from app.config import Settings
 from app.core.permissions import ChunkACL, build_filter
 from app.core.principal import Principal
-from app.rag.embeddings.hash import HashEmbeddingProvider
+from app.rag.embeddings.factory import get_embedding_provider
 from app.rag.vectorstore.tenant_scoped_retriever import VectorChunk
 
 
@@ -16,7 +16,7 @@ class QdrantVectorStore:
     def __init__(self, settings: Settings, client: QdrantClient | None = None) -> None:
         self.settings = settings
         self.client = client or QdrantClient(url=settings.qdrant_url)
-        self.embedder = HashEmbeddingProvider(settings.qdrant_vector_size)
+        self.embedder = get_embedding_provider(settings)
         self.ensure_collection()
 
     def ensure_collection(self) -> None:
@@ -26,16 +26,18 @@ class QdrantVectorStore:
                 collection_name=self.settings.qdrant_collection,
                 vectors_config=models.VectorParams(size=self.settings.qdrant_vector_size, distance=models.Distance.COSINE),
             )
-        for field_name, schema in (("tenant_id", models.PayloadSchemaType.KEYWORD), ("allowed_roles", models.PayloadSchemaType.KEYWORD), ("allowed_users", models.PayloadSchemaType.KEYWORD), ("sensitivity_level", models.PayloadSchemaType.INTEGER)):
+        for field_name, schema in (("tenant_id", models.PayloadSchemaType.KEYWORD), ("allowed_roles", models.PayloadSchemaType.KEYWORD), ("allowed_users", models.PayloadSchemaType.KEYWORD), ("sensitivity_level", models.PayloadSchemaType.INTEGER), ("document_status", models.PayloadSchemaType.KEYWORD)):
             self.client.create_payload_index(collection_name=self.settings.qdrant_collection, field_name=field_name, field_schema=schema)
 
     def upsert(self, chunks: list[VectorChunk]) -> None:
         points = []
         for chunk in chunks:
-            points.append(models.PointStruct(id=str(uuid5(NAMESPACE_URL, chunk.acl.chunk_id)), vector=self.embedder.embed(chunk.text), payload={
+            point_id = str(uuid5(NAMESPACE_URL, f"{chunk.acl.tenant_id}:{chunk.doc_id}:{chunk.acl.chunk_id}"))
+            points.append(models.PointStruct(id=point_id, vector=self.embedder.embed(chunk.text), payload={
                 "tenant_id": chunk.acl.tenant_id,
                 "chunk_id": chunk.acl.chunk_id,
                 "doc_id": chunk.doc_id,
+                "document_status": chunk.document_status,
                 "text": chunk.text,
                 "allowed_roles": sorted(chunk.acl.allowed_roles),
                 "allowed_users": sorted(chunk.acl.allowed_users),
@@ -48,14 +50,28 @@ class QdrantVectorStore:
     def search(self, principal: Principal, query: str, top_k: int) -> list[VectorChunk]:
         filter_spec = build_filter(principal)
         must = [models.FieldCondition(key=condition["key"], **self._condition(condition)) for condition in filter_spec["must"]]
+        must.append(models.FieldCondition(key="document_status", match=models.MatchValue(value="ready")))
         should = [models.FieldCondition(key=condition["key"], **self._condition(condition)) for condition in filter_spec.get("should", [])]
         query_filter = models.Filter(
             must=must,
             min_should=models.MinShould(conditions=should, min_count=filter_spec["minimum_should_match"])
             if should and "admin" not in principal.roles else None,
         )
-        response = self.client.query_points(collection_name=self.settings.qdrant_collection, query=self.embedder.embed(query), query_filter=query_filter, limit=min(top_k, 20), with_payload=True).points
-        return [self._chunk(point) for point in response if isinstance(point.payload, dict)]
+        score_threshold = self.settings.retrieval_score_threshold if self.settings.embedding_provider != "hash" else None
+        response = self.client.query_points(
+            collection_name=self.settings.qdrant_collection,
+            query=self.embedder.embed(query),
+            query_filter=query_filter,
+            limit=min(top_k, 20),
+            score_threshold=score_threshold,
+            with_payload=True,
+        ).points
+        chunks = [self._chunk(point) for point in response if isinstance(point.payload, dict)]
+        if self.settings.embedding_provider == "hash":
+            query_terms = {term.lower().strip(".,;:!?\"'") for term in query.split() if term}
+            if query_terms:
+                chunks = [c for c in chunks if query_terms & {t.strip(".,;:!?\"'") for t in c.text.lower().split()}]
+        return chunks
 
     def update_document_acl(self, tenant_id: str, document_id: str, allowed_roles: set[str], allowed_users: set[str], sensitivity: str) -> None:
         self.client.set_payload(collection_name=self.settings.qdrant_collection, payload={"allowed_roles": sorted(allowed_roles), "allowed_users": sorted(allowed_users), "sensitivity": sensitivity, "sensitivity_level": {"public": 0, "internal": 1, "confidential": 2, "restricted": 3}[sensitivity]}, points=models.Filter(must=[models.FieldCondition(key="tenant_id", match=models.MatchValue(value=tenant_id)), models.FieldCondition(key="doc_id", match=models.MatchValue(value=document_id))]), wait=True)
@@ -77,4 +93,4 @@ class QdrantVectorStore:
     def _chunk(point: Any) -> VectorChunk:
         payload = point.payload
         acl = ChunkACL(payload["tenant_id"], payload["chunk_id"], frozenset(payload.get("allowed_roles", [])), frozenset(payload.get("allowed_users", [])), payload.get("sensitivity", "restricted"))
-        return VectorChunk(acl, payload.get("text", ""), float(point.score or 0), payload.get("doc_id", ""))
+        return VectorChunk(acl, payload.get("text", ""), float(point.score or 0), payload.get("doc_id", ""), payload.get("document_status", "ready"))

@@ -20,3 +20,21 @@ def test_restricted_only_and_no_results_have_same_response_shape() -> None:
     assert restricted_body["citations"] == absent_body["citations"] == []
     assert "restricted" not in str(restricted_body).lower()
     assert "hidden" not in str(restricted_body).lower()
+
+
+def test_restricted_query_parity_at_calibrated_threshold() -> None:
+    from app.config import get_settings
+    settings = get_settings()
+    orig = settings.retrieval_score_threshold
+    settings.retrieval_score_threshold = 0.35
+    try:
+        client = TestClient(app)
+        headers = {"Authorization": f"Bearer {_token(client, 'dave')}"}
+        # Dave asks about compensation benchmark base pay (target is restricted salary bands)
+        resp = client.post("/v1/query", headers=headers, json={"question": "compensation benchmark base pay"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["citations"] == []
+        assert data["answer"] == "I don't have access to information that answers this."
+    finally:
+        settings.retrieval_score_threshold = orig

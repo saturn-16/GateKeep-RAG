@@ -14,10 +14,11 @@ dependencies = [
   "sqlalchemy>=2.0,<3",
   "alembic>=1.14,<2",
   "psycopg[binary]>=3.2,<4",
-  "qdrant-client>=1.12,<1.14",
+  "qdrant-client>=1.19.1,<2",
   "python-multipart>=0.0.9,<1",
   "pypdf>=6.19,<7",
   "python-docx>=1.1,<2",
+  "sentence-transformers>=3.0",
 ]
 
 [project.optional-dependencies]
@@ -28,7 +29,11 @@ redis = ["redis>=5,<6"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
-markers = ["real_stack: requires live Qdrant and PostgreSQL services"]
+markers = [
+  "real_stack: requires live Qdrant and PostgreSQL services",
+  "ollama: opt-in test requiring running Ollama daemon with llama3.2:3b",
+  "model_download: opt-in test requiring network model download",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
