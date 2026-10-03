@@ -5,6 +5,7 @@ in the corpus produces mathematically identical responses, citations, and error 
 """
 
 import os
+import secrets
 from uuid import uuid4
 
 import pytest
@@ -39,7 +40,7 @@ def test_counterfactual_restricted_document_invariance() -> None:
     doc_id = f"{tenant_id}:salary-restricted"
     chunk_id = f"{doc_id}:chunk-0"
 
-    # Setup tenant, roles, users, and public/internal documents
+    # Setup tenant, roles, users, and permitted internal document
     with Session(engine) as session:
         session.merge(Tenant(id=tenant_id, name=f"CF Test Tenant {tenant_id}"))
         session.flush()
@@ -54,7 +55,7 @@ def test_counterfactual_restricted_document_invariance() -> None:
         session.merge(User(id=bob_id, tenant_id=tenant_id, password_hash="!", clearance="restricted", active=True, roles=["hr"]))
         session.flush()
 
-        # Seed ordinary internal document
+        # Seed ordinary internal document (permitted for employee Dave and HR Bob)
         internal_doc_id = f"{tenant_id}:handbook"
         session.merge(Document(id=internal_doc_id, tenant_id=tenant_id, title="Employee Handbook", status="ready", source="test", created_by="admin"))
         session.flush()
@@ -62,7 +63,7 @@ def test_counterfactual_restricted_document_invariance() -> None:
             id=f"{internal_doc_id}:0",
             tenant_id=tenant_id,
             document_id=internal_doc_id,
-            text="Employee standard guidelines and office hours.",
+            text="Employee standard guidelines and office hours: core hours are ten am to four pm.",
             content_hash="h" * 64,
             allowed_roles=["employee", "hr", "admin"],
             allowed_users=[],
@@ -71,7 +72,7 @@ def test_counterfactual_restricted_document_invariance() -> None:
         session.commit()
 
     vector_store.upsert([
-        VectorChunk(ChunkACL(tenant_id, f"{internal_doc_id}:0", frozenset({"employee", "hr", "admin"}), sensitivity="internal"), "Employee standard guidelines and office hours.", doc_id=internal_doc_id),
+        VectorChunk(ChunkACL(tenant_id, f"{internal_doc_id}:0", frozenset({"employee", "hr", "admin"}), sensitivity="internal"), "Employee standard guidelines and office hours: core hours are ten am to four pm.", doc_id=internal_doc_id),
     ])
 
     dave_token = create_access_token(
@@ -85,26 +86,34 @@ def test_counterfactual_restricted_document_invariance() -> None:
         3600,
     )
 
-    query_payload = {"question": "compensation benchmark executive salary band"}
+    permitted_query = {"question": "What are the core employee office hours?"}
+    restricted_query = {"question": "compensation benchmark executive salary band"}
 
     # -----------------------------------------------------------------------
-    # World 1: Restricted document is NOT present in the system at all
+    # World 1 (TRUE REMOVAL / Baseline): Restricted document NEVER created
     # -----------------------------------------------------------------------
-    dave_world1 = client.post("/v1/query", headers={"Authorization": f"Bearer {dave_token}"}, json=query_payload)
-    bob_world1 = client.post("/v1/query", headers={"Authorization": f"Bearer {bob_token}"}, json=query_payload)
+    # 1. Permitted query: Dave DOES receive citations from permitted handbook
+    dave_w1_perm = client.post("/v1/query", headers={"Authorization": f"Bearer {dave_token}"}, json=permitted_query)
+    assert dave_w1_perm.status_code == 200
+    dave_w1_perm_data = dave_w1_perm.json()
+    assert len(dave_w1_perm_data["citations"]) > 0, "Unauthorized user must receive citations for permitted query"
+    assert dave_w1_perm_data["citations"][0]["chunk_id"] == f"{internal_doc_id}:0"
+    assert set(dave_w1_perm_data.keys()) == {"answer", "citations", "audit_id"}
 
-    assert dave_world1.status_code == 200
-    assert bob_world1.status_code == 200
-    dave_world1_data = dave_world1.json()
-    bob_world1_data = bob_world1.json()
+    # 2. Restricted query: Dave receives standard refusal and []
+    dave_w1_rest = client.post("/v1/query", headers={"Authorization": f"Bearer {dave_token}"}, json=restricted_query)
+    assert dave_w1_rest.status_code == 200
+    dave_w1_rest_data = dave_w1_rest.json()
+    assert dave_w1_rest_data["citations"] == []
 
-    assert dave_world1_data["citations"] == []
-    assert bob_world1_data["citations"] == []
+    # Bob also receives [] because restricted doc does not exist yet
+    bob_w1_rest = client.post("/v1/query", headers={"Authorization": f"Bearer {bob_token}"}, json=restricted_query)
+    assert bob_w1_rest.json()["citations"] == []
 
     # -----------------------------------------------------------------------
-    # World 2: Restricted document IS present with restricted ACLs and Canary
+    # World 2: Restricted document IS ingested into PostgreSQL and Qdrant
     # -----------------------------------------------------------------------
-    canary = f"CANARY_{uuid4().hex[:12]}_SECRET"
+    canary = f"CANARY_{secrets.token_hex(16).upper()}_RESTRICTED"
     restricted_text = f"Executive compensation benchmark executive salary band is 350000 base pay. {canary}"
     with Session(engine) as session:
         session.merge(Document(id=doc_id, tenant_id=tenant_id, title="Restricted Salaries", status="ready", source="test", created_by="admin"))
@@ -126,26 +135,66 @@ def test_counterfactual_restricted_document_invariance() -> None:
     ])
 
     try:
-        dave_world2 = client.post("/v1/query", headers={"Authorization": f"Bearer {dave_token}"}, json=query_payload)
-        bob_world2 = client.post("/v1/query", headers={"Authorization": f"Bearer {bob_token}"}, json=query_payload)
+        # 1. Permitted query under World 2:
+        # Dave MUST receive identical answer, identical citations (ID and order), scores within tolerance, and identical shape
+        dave_w2_perm = client.post("/v1/query", headers={"Authorization": f"Bearer {dave_token}"}, json=permitted_query)
+        assert dave_w2_perm.status_code == 200
+        dave_w2_perm_data = dave_w2_perm.json()
 
-        assert dave_world2.status_code == 200
-        assert bob_world2.status_code == 200
-        dave_world2_data = dave_world2.json()
-        bob_world2_data = bob_world2.json()
+        assert dave_w2_perm_data["answer"] == dave_w1_perm_data["answer"]
+        w1_chunk_ids = [c["chunk_id"] for c in dave_w1_perm_data["citations"]]
+        w2_chunk_ids = [c["chunk_id"] for c in dave_w2_perm_data["citations"]]
+        assert w1_chunk_ids == w2_chunk_ids == [f"{internal_doc_id}:0"]
 
-        # Authorized HR Bob retrieves the restricted chunk in World 2
-        bob_retrieved_chunk_ids = [c["chunk_id"] for c in bob_world2_data["citations"]]
-        assert chunk_id in bob_retrieved_chunk_ids
+        w1_score = dave_w1_perm_data["citations"][0]["score"]
+        w2_score = dave_w2_perm_data["citations"][0]["score"]
+        assert abs(w1_score - w2_score) < 1e-4, f"Score difference exceeded tolerance: {w1_score} vs {w2_score}"
+        assert set(dave_w2_perm_data.keys()) == set(dave_w1_perm_data.keys()) == {"answer", "citations", "audit_id"}
 
-        # COUNTERFACTUAL INVARIANCE ASSERTION:
-        # For unauthorized Dave, World 1 and World 2 MUST BE IDENTICAL in shape, citations, and answer
-        assert dave_world2_data["citations"] == dave_world1_data["citations"] == []
-        assert dave_world2_data["answer"] == dave_world1_data["answer"]
-        assert canary not in str(dave_world2_data)
+        # 2. Restricted query under World 2:
+        dave_w2_rest = client.post("/v1/query", headers={"Authorization": f"Bearer {dave_token}"}, json=restricted_query)
+        assert dave_w2_rest.status_code == 200
+        dave_w2_rest_data = dave_w2_rest.json()
+
+        assert dave_w2_rest_data["citations"] == dave_w1_rest_data["citations"] == []
+        assert dave_w2_rest_data["answer"] == dave_w1_rest_data["answer"]
+        assert set(dave_w2_rest_data.keys()) == {"answer", "citations", "audit_id"}
+        assert canary not in str(dave_w2_rest_data)
+
+        # 3. Authorized Bob query under World 2: Bob DOES retrieve the restricted chunk
+        bob_w2_rest = client.post("/v1/query", headers={"Authorization": f"Bearer {bob_token}"}, json=restricted_query)
+        assert bob_w2_rest.status_code == 200
+        bob_retrieved_ids = [c["chunk_id"] for c in bob_w2_rest.json()["citations"]]
+        assert chunk_id in bob_retrieved_ids
+
+        # -------------------------------------------------------------------
+        # World 3: TRUE REMOVAL - delete restricted doc/chunk from DB & Qdrant
+        # -------------------------------------------------------------------
+        with Session(engine) as session:
+            session.execute(text("DELETE FROM chunks WHERE id=:cid"), {"cid": chunk_id})
+            session.execute(text("DELETE FROM documents WHERE id=:did"), {"did": doc_id})
+            session.commit()
+
+        from qdrant_client.http import models as rest_models
+        vector_store.client.delete(
+            collection_name=settings.qdrant_collection,
+            points_selector=rest_models.FilterSelector(
+                filter=rest_models.Filter(
+                    must=[rest_models.FieldCondition(key="chunk_id", match=rest_models.MatchValue(value=chunk_id))]
+                )
+            ),
+            wait=True,
+        )
+
+        # After TRUE removal, Bob receives [] and Dave maintains identical permitted results
+        bob_w3_rest = client.post("/v1/query", headers={"Authorization": f"Bearer {bob_token}"}, json=restricted_query)
+        assert bob_w3_rest.json()["citations"] == []
+
+        dave_w3_perm = client.post("/v1/query", headers={"Authorization": f"Bearer {dave_token}"}, json=permitted_query)
+        assert [c["chunk_id"] for c in dave_w3_perm.json()["citations"]] == [f"{internal_doc_id}:0"]
 
     finally:
-        # Cleanup
+        # Full tenant cleanup
         with Session(engine) as session:
             session.execute(text("DELETE FROM chunks WHERE tenant_id=:t"), {"t": tenant_id})
             session.execute(text("DELETE FROM documents WHERE tenant_id=:t"), {"t": tenant_id})
@@ -162,3 +211,4 @@ def test_counterfactual_restricted_document_invariance() -> None:
             ),
             wait=True,
         )
+
