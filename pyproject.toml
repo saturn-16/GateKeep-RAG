@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gatekeep-rag"
+version = "0.1.0"
+description = "Permission-aware multi-tenant RAG service"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "uvicorn[standard]>=0.30,<1",
+  "pydantic-settings>=2.6,<3",
+  "sqlalchemy>=2.0,<3",
+  "alembic>=1.14,<2",
+  "psycopg[binary]>=3.2,<4",
+  "qdrant-client>=1.12,<1.14",
+  "python-multipart>=0.0.9,<1",
+  "pypdf>=6.19,<7",
+  "python-docx>=1.1,<2",
+]
+
+[project.optional-dependencies]
+test = ["httpx>=0.27,<1", "pytest>=9.0.3,<10", "pytest-cov>=7,<8", "testcontainers[postgres]>=4.9,<5"]
+security = ["PyJWT>=2.9,<3", "pwdlib[argon2]>=0.2,<1"]
+redis = ["redis>=5,<6"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+markers = ["real_stack: requires live Qdrant and PostgreSQL services"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

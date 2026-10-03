@@ -1,0 +1,6 @@
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Allow documented example values in test fixtures only"
+paths = ['''\.env\.example$''']

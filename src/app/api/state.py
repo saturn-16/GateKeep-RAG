@@ -1,0 +1,77 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from hashlib import sha256
+import uuid
+
+from app.audit.hashchain import AuditRecord, make_record
+from app.config import get_settings
+from app.core.principal import Principal
+from app.core.security import hash_password, verify_password
+from app.rag.llm import MockLLM
+from app.rag.vectorstore.tenant_scoped_retriever import TenantScopedRetriever, VectorChunk
+from app.core.permissions import ChunkACL
+from app.core.rate_limit import InMemoryRateLimiter
+
+
+@dataclass(slots=True)
+class User:
+    user_id: str
+    tenant_id: str
+    password_hash: str
+    roles: frozenset[str]
+    clearance: str
+    active: bool = True
+
+
+@dataclass(slots=True)
+class ServiceState:
+    users: dict[str, User] = field(default_factory=dict)
+    audits: list[AuditRecord] = field(default_factory=list)
+    document_status: dict[str, dict[str, str]] = field(default_factory=dict)
+    retriever: TenantScopedRetriever = field(default_factory=TenantScopedRetriever)
+    llm: MockLLM = field(default_factory=MockLLM)
+    vector_store: QdrantVectorStore | None = None
+    limiter: InMemoryRateLimiter = field(default_factory=InMemoryRateLimiter)
+
+    def audit(self, user: User, action: str, details: dict[str, object]) -> AuditRecord:
+        previous = next((record.row_hash for record in reversed(self.audits) if record.tenant_id == user.tenant_id), "")
+        record = make_record(str(uuid.uuid4()), user.tenant_id, user.user_id, action, details, previous)
+        self.audits.append(record)
+        return record
+
+
+def create_demo_state() -> ServiceState:
+    settings = get_settings()
+    users = {
+        "alice": User("alice", "acme-corp", hash_password("alice"), frozenset({"admin"}), "restricted"),
+        "bob": User("bob", "acme-corp", hash_password("bob"), frozenset({"hr"}), "restricted"),
+        "dave": User("dave", "acme-corp", hash_password("dave"), frozenset({"employee"}), "internal"),
+        "frank": User("frank", "globex-inc", hash_password("frank"), frozenset({"admin"}), "restricted"),
+    }
+    chunks = [
+        VectorChunk(ChunkACL("acme-corp", "handbook-acme", frozenset({"employee", "hr", "admin"}), sensitivity="internal"), "employee handbook benefits", 1.0, "handbook"),
+        VectorChunk(ChunkACL("acme-corp", "salary-acme", frozenset({"hr", "admin"}), sensitivity="restricted"), "salary band engineers acme 120000", 1.0, "salary"),
+        VectorChunk(ChunkACL("globex-inc", "salary-globex", frozenset({"hr", "admin"}), sensitivity="restricted"), "salary band engineers globex 90000", 1.0, "salary"),
+    ]
+    if settings.vector_backend == "qdrant":
+        from app.rag.vectorstore.qdrant_store import QdrantVectorStore
+
+        vector_store = QdrantVectorStore(settings)
+        vector_store.upsert(chunks)
+        return ServiceState(users=users, retriever=TenantScopedRetriever(backend=vector_store), vector_store=vector_store)
+    return ServiceState(users=users, retriever=TenantScopedRetriever(chunks))
+
+
+state = create_demo_state()
+
+
+def authenticate(username: str, password: str) -> User | None:
+    user = state.users.get(username)
+    if user and user.active and verify_password(password, user.password_hash):
+        return user
+    return None
+
+
+def question_hash(question: str) -> str:
+    return sha256(question.encode()).hexdigest()
