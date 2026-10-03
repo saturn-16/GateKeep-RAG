@@ -27,20 +27,21 @@ def test_tenant_id_safety_and_cross_tenant_tamper_resistance() -> None:
     alice_headers = {"Authorization": f"Bearer {alice_token}"}
     frank_headers = {"Authorization": f"Bearer {frank_token}"}
 
+    from uuid import UUID, uuid4
+    run_id = uuid4().hex[:8]
     # 1. Tenant A (Alice, acme-corp) ingests a sensitive document
     ingest_resp = client.post(
         "/v1/documents/text",
         headers=alice_headers,
         json={
-            "title": "Acme Confidential Strategy 2026",
-            "text": "Acme strategic roadmap details quantum encryption deployment.",
+            "title": f"Acme Confidential Strategy {run_id}",
+            "text": f"Acme strategic roadmap details quantum encryption deployment {run_id}.",
             "allowed_roles": ["admin"],
             "sensitivity": "restricted",
         },
     )
     assert ingest_resp.status_code == 200
     doc_a_id = ingest_resp.json()["id"]
-    from uuid import UUID
     UUID(doc_a_id)
 
     # Tenant A can see status and query the document
@@ -48,7 +49,7 @@ def test_tenant_id_safety_and_cross_tenant_tamper_resistance() -> None:
     assert status_a.status_code == 200
     assert status_a.json()["status"] == "ready"
 
-    query_a = client.post("/v1/query", headers=alice_headers, json={"question": "quantum encryption deployment"})
+    query_a = client.post("/v1/query", headers=alice_headers, json={"question": f"quantum encryption deployment {run_id}"})
     assert query_a.status_code == 200
     assert any(citation["doc_id"] == doc_a_id for citation in query_a.json()["citations"])
 
@@ -98,7 +99,7 @@ def test_tenant_id_safety_and_cross_tenant_tamper_resistance() -> None:
         doc_a_db = session.get(Document, doc_a_id)
         assert doc_a_db is not None
         assert doc_a_db.tenant_id == "acme-corp"
-        assert doc_a_db.title == "Acme Confidential Strategy 2026"
+        assert doc_a_db.title == f"Acme Confidential Strategy {run_id}"
         assert doc_a_db.created_by == "alice"
         assert doc_a_db.status == "ready"
 
@@ -110,11 +111,11 @@ def test_tenant_id_safety_and_cross_tenant_tamper_resistance() -> None:
             assert chunk.sensitivity == "restricted"
 
     # Tenant A still retrieves their document intact
-    query_a_after = client.post("/v1/query", headers=alice_headers, json={"question": "quantum encryption deployment"})
+    query_a_after = client.post("/v1/query", headers=alice_headers, json={"question": f"quantum encryption deployment {run_id}"})
     assert query_a_after.status_code == 200
     assert any(citation["doc_id"] == doc_a_id for citation in query_a_after.json()["citations"])
 
     # Tenant B cannot retrieve Tenant A's document under any circumstances
-    query_b = client.post("/v1/query", headers=frank_headers, json={"question": "quantum encryption deployment"})
+    query_b = client.post("/v1/query", headers=frank_headers, json={"question": f"quantum encryption deployment {run_id}"})
     assert query_b.status_code == 200
     assert all(citation["doc_id"] != doc_a_id for citation in query_b.json()["citations"])

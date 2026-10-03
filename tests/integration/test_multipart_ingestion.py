@@ -56,34 +56,36 @@ def test_end_to_end_multipart_ingestion_and_failure_handling() -> None:
     hr_headers = {"Authorization": f"Bearer {bob_token}"}
     emp_headers = {"Authorization": f"Bearer {dave_token}"}
 
+    from uuid import uuid4
+    run_id = uuid4().hex[:8]
     uploads = [
         (
-            "benchmarks.pdf",
-            _generate_pdf("Executive Compensation Benchmarks 2026 for high-performing leaders"),
+            f"benchmarks-{run_id}.pdf",
+            _generate_pdf(f"Executive Compensation Benchmarks {run_id} for high-performing leaders"),
             "application/pdf",
-            "Executive Compensation Benchmarks",
-            "Executive Compensation Benchmarks",
+            f"Executive Compensation Benchmarks {run_id}",
+            f"Executive Compensation Benchmarks {run_id}",
         ),
         (
-            "severance.docx",
-            _generate_docx("Confidential Severance Guidelines and executive transition policies"),
+            f"severance-{run_id}.docx",
+            _generate_docx(f"Confidential Severance Guidelines {run_id} and executive transition policies"),
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            "Executive Severance Guidelines",
-            "executive transition policies",
+            f"Executive Severance Guidelines {run_id}",
+            f"executive transition policies {run_id}",
         ),
         (
-            "ratings.md",
-            b"# Leadership Performance Ratings\n\nConfidential calibrated ratings for leadership review.",
+            f"ratings-{run_id}.md",
+            f"# Leadership Performance Ratings {run_id}\n\nConfidential calibrated ratings {run_id} for leadership review.".encode(),
             "text/markdown",
-            "Leadership Performance Ratings",
-            "calibrated ratings leadership",
+            f"Leadership Performance Ratings {run_id}",
+            f"calibrated ratings {run_id}",
         ),
         (
-            "medical.txt",
-            b"Medical Benefit Exceptions for executive management.",
+            f"medical-{run_id}.txt",
+            f"Medical Benefit Exceptions {run_id} for executive management.".encode(),
             "text/plain",
-            "Medical Benefit Exceptions",
-            "Medical Benefit Exceptions",
+            f"Medical Benefit Exceptions {run_id}",
+            f"Medical Benefit Exceptions {run_id}",
         ),
     ]
 
