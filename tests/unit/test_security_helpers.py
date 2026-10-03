@@ -7,6 +7,7 @@ from app.rag.generation.output_guard import guard_output
 
 def test_password_and_token_round_trip() -> None:
     encoded = hash_password("correct horse battery staple")
+    assert encoded.startswith("scrypt$")
     assert verify_password("correct horse battery staple", encoded)
     assert not verify_password("wrong", encoded)
     token = create_access_token({"sub": "alice", "tenant_id": "acme", "roles": ["admin"]}, "test", 60)
