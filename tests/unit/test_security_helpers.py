@@ -7,18 +7,21 @@ from app.rag.generation.output_guard import guard_output
 
 def test_password_and_token_round_trip() -> None:
     encoded = hash_password("correct horse battery staple")
-    assert encoded.startswith("scrypt$")
+    assert encoded.startswith("scrypt$131072$8$1$")
     assert verify_password("correct horse battery staple", encoded)
     assert not verify_password("wrong", encoded)
 
-    # Verify backward-compatibility fallback with legacy N=2^14 fixture
-    import hashlib, os
-    from app.core.security import _b64
-    legacy_salt = os.urandom(16)
-    legacy_digest = hashlib.scrypt(b"legacy_pass", salt=legacy_salt, n=2**14, r=8, p=1)
-    legacy_encoded = f"scrypt${_b64(legacy_salt)}${_b64(legacy_digest)}"
-    assert verify_password("legacy_pass", legacy_encoded)
-    assert not verify_password("wrong", legacy_encoded)
+    # Verify custom stored parameters are strictly parsed and verified without blind fallback
+    custom_encoded = hash_password("custom_pass", n=2**14, r=8, p=1)
+    assert custom_encoded.startswith("scrypt$16384$8$1$")
+    assert verify_password("custom_pass", custom_encoded)
+    assert not verify_password("wrong", custom_encoded)
+
+    # Malformed hashes, invalid algorithms, or corrupted parameter fields return False
+    assert not verify_password("pass", "argon2id$v=19$...")
+    assert not verify_password("pass", "scrypt$invalid$8$1$salt$digest")
+    assert not verify_password("pass", "scrypt$16384$8$salt$digest")
+    assert not verify_password("pass", "scrypt$0$8$1$salt$digest")
 
     token = create_access_token({"sub": "alice", "tenant_id": "acme", "roles": ["admin"]}, "test", 60)
     assert decode_access_token(token, "test")["sub"] == "alice"
