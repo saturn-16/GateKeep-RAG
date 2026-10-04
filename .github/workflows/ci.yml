@@ -59,6 +59,15 @@ jobs:
           PERSISTENCE_BACKEND: postgres
           VECTOR_BACKEND: qdrant
           RUN_REAL_STACK: "1"
+      - name: Run counterfactual and security suites with hybrid retrieval enabled
+        run: python -m pytest -q -rs tests/security/test_counterfactual.py tests/security/test_threshold_independence.py -m "not ollama"
+        env:
+          PYTHONPATH: src
+          DATABASE_URL: postgresql+psycopg://gatekeep_app:gatekeep@localhost:5432/gatekeep
+          PERSISTENCE_BACKEND: postgres
+          VECTOR_BACKEND: qdrant
+          RUN_REAL_STACK: "1"
+          ENABLE_HYBRID_SEARCH: "true"
       - run: python -m compileall -q src tests
       - run: python -m pip freeze | grep -v '^-e ' > audit-requirements.txt
       - run: pip-audit -r audit-requirements.txt --no-deps

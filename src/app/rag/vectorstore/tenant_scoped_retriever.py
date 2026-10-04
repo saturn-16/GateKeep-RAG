@@ -12,6 +12,7 @@ class VectorChunk:
     score: float = 0.0
     doc_id: str = ""
     document_status: str = "ready"
+    embed_text: str | None = None
 
 
 class TenantContextRequired(RuntimeError):

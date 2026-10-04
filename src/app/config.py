@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     embedding_model_name: str = "all-MiniLM-L6-v2"
     retrieval_score_threshold: float = 0.30
     log_raw_queries: bool = False
+    enable_hybrid_search: bool = False
 
     model_config = SettingsConfigDict(env_file=".env", env_prefix="", case_sensitive=False)
 
