@@ -47,4 +47,11 @@ def query(request: QueryRequest, user: User = Depends(current_user), identity: P
     prompt = build_prompt(identity, chunks, request.question)
     answer = guard_output(state.llm.answer(prompt), {chunk.acl.chunk_id for chunk in chunks})
     audit = write_audit(state, user, "query", {"question_hash": question_hash(request.question), "retrieved_chunk_ids": [chunk.acl.chunk_id for chunk in chunks], "retrieved_doc_ids": [chunk.doc_id for chunk in chunks], "num_returned": len(chunks)}, db)
-    return {"answer": answer, "citations": [{"chunk_id": chunk.acl.chunk_id, "doc_id": chunk.doc_id} for chunk in chunks], "audit_id": audit.id}
+    return {
+        "answer": answer,
+        "citations": [
+            {"chunk_id": chunk.acl.chunk_id, "doc_id": chunk.doc_id, "score": round(float(chunk.score), 4)}
+            for chunk in chunks
+        ],
+        "audit_id": audit.id,
+    }
