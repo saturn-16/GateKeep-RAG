@@ -61,37 +61,54 @@ flowchart TD
 
 ---
 
-## Test & Evaluation Results
+## Security & Evaluation Results
 
-All metrics are proven against the live PostgreSQL 16 and Qdrant 1.19.1 services on an expanded multi-tenant corporate corpus:
+All security invariants and empirical metrics are proven against live PostgreSQL 16 and Qdrant 1.19.1 services on an expanded multi-tenant corporate corpus:
 
-| Check / Metric | Result | Verification Evidence & Scope |
+### Core Security Guarantees: Counterfactual Invariance & Canary Defense
+
+1. **Counterfactual Invariance (100.00% Invariance Rate - 0 Mismatches)**
+   - **Evaluation Methodology**: For all 1,750 unauthorized principal-query pairs (across 3,850 total queries evaluated in 11 user personas and 3 tenants), queries were executed in **World 1** (restricted documents present) and **World 2** (TRUE REMOVAL: restricted documents completely deleted from PostgreSQL and Qdrant).
+   - **Permitted Document Retrieval**: In **996 pairs**, unauthorized users legitimately retrieved citations from permitted public or internal documents; citations (IDs and ordering), scores (within $10^{-4}$ tolerance), and answers were mathematically identical between World 1 and World 2.
+   - **Restricted / Unmatched Retrieval**: In **754 pairs**, unauthorized users received the standard no-access response (`citations: []`, identical refusal answer).
+   - **Result**: **0 mismatches** across all 1,750 unauthorized evaluations. The presence of restricted documents causes zero behavioral or observational divergence for unauthorized principals.
+
+2. **Canary Token Isolation (0 Leaks / 89,250 Checks)**
+   - **Entropy & Generation**: 27 unique cryptographically random canary tokens generated via Python `secrets.token_hex(16)` (128 bits of entropy) were embedded into restricted document chunks across all tenants.
+   - **Inspection Depth**: For every unauthorized query evaluation, 3 distinct locations are checked:
+     1. Raw prompt string and `DOCUMENT CONTEXT` sent to the LLM backend (intercepted via `PromptCapturingLLM`)
+     2. Generated LLM answer text
+     3. JSON response citations and metadata
+   - **Result**: $255 \text{ unauthorized user-canary pairs} \times 350 \text{ queries} = \mathbf{89,250} \text{ checks}$ ($267,750$ location inspections). **0 canary violations detected (0.00% leak rate)**.
+
+### Evaluation Metrics Summary (Corpus: 247 chunks, 30 documents, 3 tenants)
+
+| Metric | Result | Scope & Context |
 |---|---|---|
-| **Live Integration & Security Suite** | **32 passed, 0 skipped, 0 failed** (100% pass) | `pytest -v` across real stack (`RUN_REAL_STACK=1`, `PERSISTENCE_BACKEND=postgres`) |
-| **Corpus Scale & Domain Breadth** | **246 chunks** (30 documents x 3 tenants) | 3 distinct tenants (`acme-corp`, `globex-inc`, `initech-llc`) |
-| **Personas & Clearances Evaluated** | **11 users** across admin, HR, finance, engineering, employee | `scripts/run_eval.py` (Corpus: 246 chunks) |
-| **User-Query Pairs Checked** | **2,860 pairs** (targeted, adversarial, near-duplicates, out-of-domain) | `scripts/run_eval.py` (Corpus: 246 chunks) |
-| **Cross-Tenant Leak Rate** | **0.00%** (0 leaks / 2,860 queries) | `scripts/run_eval.py` (Corpus: 246 chunks) |
-| **Canary Token Violations** | **0 / 66,300 checks** (0 violations across all unauthorized pairs) | Inspects LLM prompt context, generated answer, and citation metadata (Corpus: 246 chunks) |
-| **Counterfactual Invariance Rate** | **100.00%** (1,300 unauthorized pairs checked, 0 mismatches) | Responses identical with restricted documents present vs completely removed (`tests/security/test_counterfactual.py`) |
-| **Recall@5 (Permitted Queries)** | **100.00%** at threshold 0.35 (99.18% at 0.40) | `scripts/run_eval.py` (Corpus: 246 chunks) |
-| **MRR (Mean Reciprocal Rank)** | **0.9949** at threshold 0.35 (0.9887 at 0.40) | `scripts/run_eval.py` (Corpus: 246 chunks) |
-| **Default Embedding Model** | `all-MiniLM-L6-v2` (384 dimensions, sentence-transformers) | `app/rag/embeddings/sentence_transformer.py` |
-| **Cryptographic Audit Integrity** | **PASSED** (`/v1/audit/verify` validated) | `tests/integration/test_audit_concurrency.py`, `tests/integration/test_audit_completeness.py` |
-| **Dependency & Secret Scans** | **0 vulnerabilities, 0 secret leaks** | `pip-audit`, `gitleaks` (CI automated scan) |
+| **Live Integration & Security Suite** | **31 passed, 0 skipped, 0 failed, 1 opt-in** | `pytest -v` across live stack (`RUN_REAL_STACK=1`, `PERSISTENCE_BACKEND=postgres`, `VECTOR_BACKEND=qdrant`) |
+| **Cross-Tenant Leak Rate** | **0.00%** (0 leaks / 3,850 queries) | Evaluated across 3 isolated organizations (`acme-corp`, `globex-inc`, `initech-llc`) |
+| **Canary Violations (Prompt + Answer + Citations)** | **0 / 89,250 checks** (0.00%) | 27 CSPRNG canaries, 267,750 location inspections across 11 users |
+| **Counterfactual Invariance (True Removal)** | **100.00%** (0 mismatches / 1,750 pairs) | 996 permitted pairs + 754 refusal pairs (`tests/security/test_counterfactual.py`) |
+| **Synthetic Query Recall@5 (Calibrated 0.35)** | **100.00%** (MRR: 0.9949) | 487 permitted synthetic query evaluations |
+| **Hand-Written Natural Phrasing Recall@5** | **62.58%** (MRR: 0.6161) | 155 permitted hand-written query evaluations (natural, colloquial phrasing) |
+| **Cryptographic Audit Integrity** | **PASSED** (`/v1/audit/verify` validated) | 50 concurrent transactions under advisory locks; append-only hash chain intact |
+| **Role Separation & Least Privilege** | **PASSED** | Application runs as non-owner `gatekeep_app`; owner role isolated to migrations |
 
-### Threshold Sensitivity Analysis (Eval Corpus: 246 chunks, 2,860 query pairs)
+### Parity as a Behavioral Metric (Not a Security Guarantee)
 
 > [!NOTE]
-> The similarity score threshold was calibrated on this 246-chunk corpus using `all-MiniLM-L6-v2`. Higher thresholds increase restricted query parity share by filtering cross-document semantic overlap, with a measured trade-off on Recall@5 for queries with phrasing divergence.
+> **Understanding Parity Share**: Restricted parity measures the percentage of queries targeting restricted documents that return the standard empty response (`"citations": []`) versus returning *permitted* chunks from the user's own clearance level.
+> - If an employee asks `"headcount hiring plan budget"`, they cannot access the restricted executive salary document. If their tenant has a permitted `employee-handbook` that discusses hiring, semantic similarity may match that permitted document.
+> - Both outcomes are 100% secure: the restricted document is never leaked. Parity share is a similarity threshold tuning metric, not a security guarantee.
+> - Thresholds were calibrated on this 247-chunk benchmark corpus using `all-MiniLM-L6-v2`.
 
-| Similarity Threshold | Recall@5 (Permitted) | MRR (Permitted) | Restricted Parity Share | Cross-Tenant Leak Rate | Canary Violations | Behavioral Profile |
+| Similarity Threshold | Overall Recall@5 | Overall MRR | Restricted Parity Share | Cross-Tenant Leak Rate | Canary Violations | Behavioral Profile |
 |:---:|:---:|:---:|:---:|:---:|:---:|---|
-| **0.25** | 100.00% | 0.9949 | 29.33% (83 / 283) | 0.00% | 0 / 66,300 checks | Broad semantic matching; loose cross-document overlap across permitted internal topics |
-| **0.30** | 100.00% | 0.9949 | 47.70% (135 / 283) | 0.00% | 0 / 66,300 checks | Moderate semantic filtering; filters unrelated internal documents |
-| **0.35** | 100.00% | 0.9949 | 73.14% (207 / 283) | 0.00% | 0 / 66,300 checks | Balanced baseline; optimal Recall@5 with increased parity |
-| **0.40** | 99.18% | 0.9887 | 89.40% (253 / 283) | 0.00% | 0 / 66,300 checks | Calibrated high-parity operating point; minor recall reduction on phrasing edge cases |
-| **0.45** | 98.15% | 0.9784 | 93.99% (266 / 283) | 0.00% | 0 / 66,300 checks | Strict matching; high parity with selective retrieval on exact terminology |
+| **0.25** | 92.68% | 0.9150 | 23.14% (106 / 458) | 0.00% | 0 / 89,250 checks | Permissive matching; permitted chunks frequently match loose keywords |
+| **0.30** | 91.74% | 0.9102 | 45.20% (207 / 458) | 0.00% | 0 / 89,250 checks | Moderate semantic filtering; filters unrelated cross-domain internal docs |
+| **0.35** | **90.97%** | **0.9034** | **69.00% (316 / 458)** | **0.00%** | **0 / 89,250 checks** | **Calibrated baseline; optimal synthetic recall (100%) and balanced parity** |
+| **0.40** | 88.63% | 0.8824 | 87.77% (402 / 458) | 0.00% | 0 / 89,250 checks | High-parity threshold; minor recall drop on phrasing edge cases |
+| **0.45** | 86.60% | 0.8621 | 93.89% (430 / 458) | 0.00% | 0 / 89,250 checks | Strict cutoff; high parity with reduced recall on colloquial phrasing |
 
 ---
 
