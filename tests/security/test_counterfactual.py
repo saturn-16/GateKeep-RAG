@@ -55,8 +55,8 @@ def test_counterfactual_restricted_document_invariance() -> None:
 
         # Dave is employee (internal clearance, no HR/admin role)
         session.merge(User(id=dave_id, tenant_id=tenant_id, password_hash="!", clearance="internal", active=True, roles=["employee"]))
-        # Bob is HR (restricted clearance, hr role)
-        session.merge(User(id=bob_id, tenant_id=tenant_id, password_hash="!", clearance="restricted", active=True, roles=["hr"]))
+        # Bob is HR (internal clearance, hr role)
+        session.merge(User(id=bob_id, tenant_id=tenant_id, password_hash="!", clearance="internal", active=True, roles=["hr"]))
         session.flush()
 
         # Seed ordinary internal document (permitted for employee Dave and HR Bob)
@@ -89,6 +89,8 @@ def test_counterfactual_restricted_document_invariance() -> None:
         settings.jwt_secret,
         3600,
     )
+    dave_principal = Principal(dave_id, tenant_id, frozenset({"employee"}), "internal")
+    bob_principal = Principal(bob_id, tenant_id, frozenset({"hr"}), "internal")
 
     permitted_query = {"question": "What are the core employee office hours?"}
     restricted_query = {"question": "compensation benchmark executive salary band"}
@@ -116,6 +118,7 @@ def test_counterfactual_restricted_document_invariance() -> None:
 
     # -----------------------------------------------------------------------
     # World 2: Restricted document IS ingested into PostgreSQL and Qdrant
+    # (Sensitivity is internal: within Dave's clearance, but strictly role-restricted to hr)
     # -----------------------------------------------------------------------
     canary = f"CANARY_{secrets.token_hex(16).upper()}_RESTRICTED"
     restricted_text = f"Executive compensation benchmark executive salary band is 350000 base pay. {canary}"
@@ -130,15 +133,20 @@ def test_counterfactual_restricted_document_invariance() -> None:
             content_hash="r" * 64,
             allowed_roles=["hr", "admin"],
             allowed_users=[],
-            sensitivity="restricted",
+            sensitivity="internal",
         ))
         session.commit()
 
     vector_store.upsert([
-        VectorChunk(ChunkACL(tenant_id, chunk_id, frozenset({"hr", "admin"}), sensitivity="restricted"), restricted_text, doc_id=doc_id),
+        VectorChunk(ChunkACL(tenant_id, chunk_id, frozenset({"hr", "admin"}), sensitivity="internal"), restricted_text, doc_id=doc_id),
     ])
 
     try:
+        # Pre-filter invariant: Vector pre-filter must NEVER return the restricted chunk to unauthorized Dave
+        raw_dave_chunks = state.retriever.search(dave_principal, restricted_query["question"], top_k=5)
+        for rc in raw_dave_chunks:
+            assert can_access(dave_principal, rc.acl), f"Qdrant pre-filter leaked chunk {rc.acl.chunk_id} to unauthorized principal {dave_id}"
+
         # 1. Permitted query under World 2:
         # Dave MUST receive identical answer, identical citations (ID and order), scores within tolerance, and identical shape
         dave_w2_perm = client.post("/v1/query", headers={"Authorization": f"Bearer {dave_token}"}, json=permitted_query)
@@ -160,10 +168,20 @@ def test_counterfactual_restricted_document_invariance() -> None:
         assert dave_w2_rest.status_code == 200
         dave_w2_rest_data = dave_w2_rest.json()
 
-        assert dave_w2_rest_data["citations"] == dave_w1_rest_data["citations"] == []
-        assert dave_w2_rest_data["answer"] == dave_w1_rest_data["answer"]
+        # Real divergence assertions: citations must match World 1 ([]), answer must match, zero canary leak
+        assert dave_w2_rest_data["citations"] == dave_w1_rest_data["citations"] == [], (
+            f"Counterfactual divergence: unauthorized principal {dave_id} received citations in World 2: {dave_w2_rest_data['citations']}"
+        )
+        assert dave_w2_rest_data["answer"] == dave_w1_rest_data["answer"], (
+            f"Counterfactual divergence: answer differed between World 1 and World 2 for {dave_id}"
+        )
         assert set(dave_w2_rest_data.keys()) == {"answer", "citations", "audit_id"}
-        assert canary not in str(dave_w2_rest_data)
+        assert canary not in str(dave_w2_rest_data), f"Canary leak in response payload for unauthorized user {dave_id}"
+
+        # Zero post-retrieval alerts: legitimate queries must not trigger alerts
+        with Session(engine) as s:
+            alerts = s.scalars(select(AuditLog).where(AuditLog.tenant_id == tenant_id, AuditLog.action == "security_alert")).all()
+            assert len(alerts) == 0, f"Post-retrieval security alert triggered for {dave_id}: {alerts}"
 
         # 3. Authorized Bob query under World 2: Bob DOES retrieve the restricted chunk
         bob_w2_rest = client.post("/v1/query", headers={"Authorization": f"Bearer {bob_token}"}, json=restricted_query)
