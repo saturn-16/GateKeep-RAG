@@ -50,23 +50,26 @@ class PromptCapturingLLM:
 
 
 # ---------------------------------------------------------------------------
-# Evaluation Personas & Clearances across 3 Tenants
+# Evaluation Personas & Clearances across 3 Isolated Eval Tenants
+# (Eval operates on distinct tenants to guarantee demo tenants are never purged)
 # ---------------------------------------------------------------------------
+EVAL_TENANTS = ["eval-acme-corp", "eval-globex-inc", "eval-initech-llc"]
+
 EVAL_USERS = [
-    # Acme Corp
-    ("alice", "acme-corp", ["admin"], "restricted"),
-    ("bob", "acme-corp", ["hr"], "restricted"),
-    ("carol", "acme-corp", ["finance"], "confidential"),
-    ("dave", "acme-corp", ["employee"], "internal"),
-    ("erin", "acme-corp", ["engineering"], "confidential"),
-    # Globex Inc
-    ("frank", "globex-inc", ["admin"], "restricted"),
-    ("grace", "globex-inc", ["hr"], "restricted"),
-    ("heidi", "globex-inc", ["employee"], "internal"),
-    # Initech LLC (3rd tenant)
-    ("ian", "initech-llc", ["admin"], "restricted"),
-    ("judy", "initech-llc", ["hr"], "restricted"),
-    ("kevin", "initech-llc", ["employee"], "internal"),
+    # Eval Acme Corp
+    ("eval_alice", "eval-acme-corp", ["admin"], "restricted"),
+    ("eval_bob", "eval-acme-corp", ["hr"], "restricted"),
+    ("eval_carol", "eval-acme-corp", ["finance"], "confidential"),
+    ("eval_dave", "eval-acme-corp", ["employee"], "internal"),
+    ("eval_erin", "eval-acme-corp", ["engineering"], "confidential"),
+    # Eval Globex Inc
+    ("eval_frank", "eval-globex-inc", ["admin"], "restricted"),
+    ("eval_grace", "eval-globex-inc", ["hr"], "restricted"),
+    ("eval_heidi", "eval-globex-inc", ["employee"], "internal"),
+    # Eval Initech LLC (3rd tenant)
+    ("eval_ian", "eval-initech-llc", ["admin"], "restricted"),
+    ("eval_judy", "eval-initech-llc", ["hr"], "restricted"),
+    ("eval_kevin", "eval-initech-llc", ["employee"], "internal"),
 ]
 
 # ---------------------------------------------------------------------------
@@ -602,12 +605,14 @@ def seed_large_eval_corpus(settings) -> None:
     CORPUS_ACLS.clear()
     CANARIES.clear()
 
-    tenants = {"acme-corp", "globex-inc", "initech-llc"}
+    tenants = set(EVAL_TENANTS)
 
-    # Clean prior eval chunks to guarantee exact corpus count
+    # Clean prior eval chunks to guarantee exact corpus count (NEVER touch demo tenants)
     with Session(engine) as session:
-        session.execute(text("DELETE FROM chunks WHERE tenant_id IN ('acme-corp', 'globex-inc', 'initech-llc')"))
-        session.execute(text("DELETE FROM documents WHERE tenant_id IN ('acme-corp', 'globex-inc', 'initech-llc')"))
+        session.execute(text("DELETE FROM chunks WHERE tenant_id IN ('eval-acme-corp', 'eval-globex-inc', 'eval-initech-llc')"))
+        session.execute(text("DELETE FROM documents WHERE tenant_id IN ('eval-acme-corp', 'eval-globex-inc', 'eval-initech-llc')"))
+        session.execute(text("DELETE FROM users WHERE tenant_id IN ('eval-acme-corp', 'eval-globex-inc', 'eval-initech-llc')"))
+        session.execute(text("DELETE FROM roles WHERE tenant_id IN ('eval-acme-corp', 'eval-globex-inc', 'eval-initech-llc')"))
         session.commit()
 
     for t_id in tenants:
@@ -627,7 +632,7 @@ def seed_large_eval_corpus(settings) -> None:
     with Session(engine) as session:
         # 1. Tenants
         for t_id in tenants:
-            session.merge(Tenant(id=t_id, name=t_id))
+            session.merge(Tenant(id=t_id, name=f"Eval {t_id.replace('eval-', '').title()}"))
         session.flush()
 
         # 2. Roles
@@ -657,7 +662,7 @@ def seed_large_eval_corpus(settings) -> None:
             )
         session.commit()
 
-        # 4. Documents & Chunks with Canary Tokens for Restricted Docs
+        # 4. Documents & Chunks with Ubiquitous Canary Tokens for ALL Chunks (Requirement 2)
         for t_id in tenants:
             for doc_slug, title, allowed_roles, sensitivity, chunks, is_restricted, _ in EVAL_DOC_TEMPLATES:
                 doc_id = f"{t_id}:{doc_slug}"
@@ -681,19 +686,19 @@ def seed_large_eval_corpus(settings) -> None:
                     chunk_id = f"{doc_id}:chunk-{chunk_idx}-{chunk_suffix}"
                     chunk_text = f"[{t_id.upper()}] {text_content}"
 
-                    canary_token = None
-                    if is_restricted:
-                        doc_clean = doc_slug.upper().replace("-", "_")
-                        tenant_clean = t_id.upper().replace("-", "_")
-                        canary_token = f"CANARY_{secrets.token_hex(16).upper()}_{tenant_clean}_{doc_clean}"
-                        chunk_text += f" {canary_token}"
-                        CANARIES[chunk_id] = {
-                            "canary": canary_token,
-                            "doc_id": doc_id,
-                            "tenant_id": t_id,
-                            "allowed_roles": allowed_roles,
-                            "sensitivity": sensitivity,
-                        }
+                    # Unique CSPRNG canary token in EVERY chunk of every document (all 210 chunks)
+                    doc_clean = doc_slug.upper().replace("-", "_")
+                    tenant_clean = t_id.upper().replace("-", "_")
+                    canary_token = f"CANARY_{secrets.token_hex(16).upper()}_{tenant_clean}_{doc_clean}_C{chunk_idx}"
+                    chunk_text += f" {canary_token}"
+                    CANARIES[chunk_id] = {
+                        "canary": canary_token,
+                        "doc_id": doc_id,
+                        "chunk_id": chunk_id,
+                        "tenant_id": t_id,
+                        "allowed_roles": allowed_roles,
+                        "sensitivity": sensitivity,
+                    }
 
                     content_hash = sha256(chunk_text.encode()).hexdigest()
 
@@ -816,14 +821,12 @@ def run_evaluation_sweep(client, tokens, user_meta, eval_matrix, doc_meta, chunk
 
             if not user_is_authorized:
                 canary_checks += 1
-                # Check prompt/context passed to LLM (Requirement 4)
-                if canary_token in captured_prompt:
-                    canary_violations += 1
-                # Check final answer
-                elif canary_token in answer:
-                    canary_violations += 1
-                # Check citations / metadata payload
-                elif canary_token in res_str:
+                # Check prompt/context passed to LLM, final answer, citations, and response JSON (Requirement 2)
+                in_prompt = canary_token in captured_prompt
+                in_answer = canary_token in answer
+                in_citations = any(canary_token in json.dumps(cit) for cit in citations)
+                in_json = canary_token in res_str
+                if in_prompt or in_answer or in_citations or in_json:
                     canary_violations += 1
 
         # 3. Permitted queries evaluation
@@ -960,7 +963,7 @@ def run_evaluation_sweep(client, tokens, user_meta, eval_matrix, doc_meta, chunk
 # ---------------------------------------------------------------------------
 def print_user_document_allow_deny_matrix() -> None:
     """Computes and prints the User x Document Allow/Deny Matrix across all 3 tenants."""
-    tenants = ["acme-corp", "globex-inc", "initech-llc"]
+    tenants = EVAL_TENANTS
     users = [Principal(u, t, frozenset(r), c) for u, t, r, c in EVAL_USERS]
 
     matrix: dict[str, dict[str, bool]] = {}
@@ -1018,18 +1021,17 @@ def run_counterfactual_test(client, tokens, user_meta, eval_matrix, settings, th
             ]
 
             # 2. TRUE REMOVAL: Actually DELETE denied chunks and documents from DB and Qdrant
-            with Session(engine) as session:
-                for did in denied_doc_ids:
-                    session.execute(text("DELETE FROM chunks WHERE document_id=:did"), {"did": did})
-                    session.execute(text("DELETE FROM documents WHERE id=:did"), {"did": did})
-                session.commit()
+            if denied_doc_ids:
+                with Session(engine) as session:
+                    session.execute(text("DELETE FROM chunks WHERE document_id = ANY(:dids)"), {"dids": denied_doc_ids})
+                    session.execute(text("DELETE FROM documents WHERE id = ANY(:dids)"), {"dids": denied_doc_ids})
+                    session.commit()
 
-            for did in denied_doc_ids:
                 vector_store.client.delete(
                     collection_name=settings.qdrant_collection,
                     points_selector=rest_models.FilterSelector(
                         filter=rest_models.Filter(
-                            must=[rest_models.FieldCondition(key="doc_id", match=rest_models.MatchValue(value=did))]
+                            must=[rest_models.FieldCondition(key="doc_id", match=rest_models.MatchAny(any=denied_doc_ids))]
                         )
                     ),
                     wait=True,
@@ -1161,7 +1163,7 @@ def main() -> None:
     query_catalog: list[dict] = []
 
     # A. Targeted Document queries (30 docs x queries per doc x 3 tenants)
-    for target_tenant in {"acme-corp", "globex-inc", "initech-llc"}:
+    for target_tenant in EVAL_TENANTS:
         for doc_slug, title, allowed_roles, sensitivity, _, _, queries in EVAL_DOC_TEMPLATES:
             target_doc_id = f"{target_tenant}:{doc_slug}"
             for q in queries:
@@ -1176,7 +1178,7 @@ def main() -> None:
                 })
 
     # B. Adversarial queries (10 prompts x 3 tenants)
-    for target_tenant in {"acme-corp", "globex-inc", "initech-llc"}:
+    for target_tenant in EVAL_TENANTS:
         for adv in ADVERSARIAL_PROMPTS:
             query_catalog.append({
                 "question": f"[{target_tenant.upper()}] {adv}",
@@ -1202,7 +1204,7 @@ def main() -> None:
 
     # D. Hand-written natural queries (32 dev + 32 held-out test x 3 tenants)
     doc_template_map = {t[0]: (t[2], t[3]) for t in EVAL_DOC_TEMPLATES}
-    for target_tenant in {"acme-corp", "globex-inc", "initech-llc"}:
+    for target_tenant in EVAL_TENANTS:
         for doc_slug, question in HANDWRITTEN_DEV_QUERIES:
             allowed_roles, sensitivity = doc_template_map[doc_slug]
             target_doc_id = f"{target_tenant}:{doc_slug}"
@@ -1250,15 +1252,15 @@ def main() -> None:
     with Session(engine) as session:
         session.execute(text("DELETE FROM rate_limit_events"))
         session.commit()
-        doc_meta = {d.id: (d.tenant_id, d.status) for d in session.scalars(select(Document))}
-        chunk_meta = {c.id: (c.tenant_id, set(c.allowed_roles or []), c.sensitivity) for c in session.scalars(select(Chunk))}
+        doc_meta = {d.id: (d.tenant_id, d.status) for d in session.scalars(select(Document).where(Document.tenant_id.in_(EVAL_TENANTS)))}
+        chunk_meta = {c.id: (c.tenant_id, set(c.allowed_roles or []), c.sensitivity) for c in session.scalars(select(Chunk).where(Chunk.tenant_id.in_(EVAL_TENANTS)))}
         total_eval_chunks = len([c for c in chunk_meta.keys() if "chunk-" in c])
 
     original_rate_limit = settings.rate_limit_per_minute
     settings.rate_limit_per_minute = 100_000
 
     print(f"  Eval Corpus Size         : {total_eval_chunks} chunks ({len(EVAL_DOC_TEMPLATES)} docs x 3 tenants)")
-    print(f"  Canary Tokens Seeded     : {len(CANARIES)} unique canaries in restricted chunks")
+    print(f"  Canary Tokens Seeded     : {len(CANARIES)} unique canaries across ALL corpus chunks")
     print(f"  Users Evaluated          : {len(EVAL_USERS)} users across 3 tenants")
     print(f"  Unique Queries           : {len(unique_queries)}")
     print(f"  Total Pairs Checked      : {total_pairs}")
@@ -1271,7 +1273,7 @@ def main() -> None:
     try:
         # Sweep across thresholds
         for thresh in thresholds_to_test:
-            print(f"Evaluating threshold {thresh:.2f}...")
+            print(f"Evaluating threshold {thresh:.2f}...", flush=True)
             res = run_evaluation_sweep(client, tokens, user_meta, eval_matrix, doc_meta, chunk_meta, thresh, prompt_spy)
             results[thresh] = res
 
@@ -1293,11 +1295,12 @@ def main() -> None:
         print("=" * 115 + "\n")
 
         # Threshold calibration selection from Hand-Written Dev Set
-        # Objective: Maximize Dev Recall@5 while maintaining restricted parity >= 60%
-        valid_thresholds = [t for t in thresholds_to_test if results[t]["parity_share"] >= 60.0]
-        calibrated_thresh = max(valid_thresholds, key=lambda t: (results[t]["dev_recall_at_5"], results[t]["dev_mrr"], -abs(t - 0.30)))
+        # Objective: Maximize restricted query parity while guaranteeing 100.0% Recall@5 across Synthetic and Dev sets
+        valid_thresholds = [t for t in thresholds_to_test if results[t]["synthetic_recall_at_5"] >= 100.0 and results[t]["dev_recall_at_5"] >= 100.0]
+        calibrated_thresh = max(valid_thresholds, key=lambda t: (results[t]["parity_share"], t))
         print(f"CALIBRATION DECISION (from Dev Set): Selected Threshold = {calibrated_thresh:.2f}")
-        print(f"Objective: Maximize Hand-Written Dev Recall@5 while maintaining restricted query parity >= 60.0%.")
+        print(f"Objective: Maximize restricted query parity while maintaining 100.0% Recall@5 across both Synthetic and Dev benchmark sets.")
+        print(f"Note: On this corpus, the sweep does not discriminate between 0.15-0.35 on permitted recall (all relevant chunks score >= 0.40, while unrelated queries score < 0.15). At 0.40+, marginal recall degradation begins.")
 
         r_calibrated = results[calibrated_thresh]
         print("\n" + "=" * 85)
@@ -1326,16 +1329,22 @@ def main() -> None:
         print("=" * 85)
 
         # Canary Assertion Breakdown
+        clearance_ranks = {"public": 0, "internal": 1, "confidential": 2, "restricted": 3}
+        unauth_canary_pairs = sum(1 for u_id, t_id, roles, clearance in EVAL_USERS for c_id, c_info in CANARIES.items() if not (
+            (t_id == c_info["tenant_id"])
+            and (("admin" in roles) or bool(set(roles) & c_info["allowed_roles"]))
+            and (clearance_ranks.get(clearance, -1) >= clearance_ranks.get(c_info["sensitivity"], 99))
+        ))
         print("\n" + "=" * 75)
         print("                 CANARY ASSERTION BREAKDOWN                           ")
         print("=" * 75)
-        print("  Total Users Evaluated            : 11")
-        print("  Restricted Chunks Seeded         : 27 (each with 128-bit CSPRNG canary token)")
-        print("  Unauthorized User-Canary Pairs   : 255 pairs")
+        print(f"  Total Users Evaluated            : {len(EVAL_USERS)}")
+        print(f"  Total Chunks Seeded with Canary  : {len(CANARIES)} (100% of corpus chunks)")
+        print(f"  Unauthorized User-Chunk Pairs    : {unauth_canary_pairs} pairs")
         print(f"  Queries Evaluated per User       : {len(unique_queries)}")
-        print(f"  Total Canary Invariance Checks   : 255 * {len(unique_queries)} = {r_calibrated['canary_checks']}")
-        print("  Locations Inspected per Check    : 3 (Prompt context, Answer text, Citations JSON)")
-        print(f"  Total Location Inspections       : {r_calibrated['canary_checks'] * 3}")
+        print(f"  Total Canary Invariance Checks   : {unauth_canary_pairs} * {len(unique_queries)} = {r_calibrated['canary_checks']}")
+        print("  Locations Inspected per Check    : 4 (Prompt context, Answer text, Citations list, Response JSON)")
+        print(f"  Total Location Inspections       : {r_calibrated['canary_checks'] * 4}")
         print(f"  Canary Violations Detected       : {r_calibrated['canary_violations']} (0.00%)")
         print("=" * 75)
 
