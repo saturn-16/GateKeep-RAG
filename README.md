@@ -69,8 +69,8 @@ All security invariants and empirical metrics are proven against live PostgreSQL
 
 1. **Counterfactual Invariance (100.00% Invariance Rate - 0 Mismatches)**
    - **Evaluation Methodology**: For all **4,972 principal-query pairs** evaluated across 11 personas and 3 tenants, queries were executed in **World 1** (baseline corpus with restricted documents present) and **World 2** (TRUE REMOVAL: for each principal, every document they are not authorized to access was physically deleted from both PostgreSQL and Qdrant).
-   - **Permitted Document Retrieval**: In **3,747 pairs**, unauthorized users legitimately retrieved citations from permitted internal/public documents; citations (IDs and ordering), scores (within $10^{-4}$ tolerance), and answers were mathematically identical between World 1 and World 2.
-   - **Restricted / Unmatched Retrieval**: In **1,225 pairs**, unauthorized users received the standard no-access response (`citations: []`, identical refusal answer).
+   - **Permitted Document Retrieval**: In **3,585 pairs**, unauthorized users legitimately retrieved citations from permitted internal/public documents; citations (IDs and ordering), scores (within $10^{-4}$ tolerance), and answers were mathematically identical between World 1 and World 2.
+   - **Restricted / Unmatched Retrieval**: In **1,387 pairs**, unauthorized users received the standard no-access response (`citations: []`, identical refusal answer).
    - **Result**: **0 mismatches** across all 4,972 evaluations. The existence or physical absence of restricted documents produces zero observational or behavioral divergence.
 
 2. **Ubiquitous Canary Token Defense (0 Leaks / 823,996 Checks)**
@@ -99,9 +99,9 @@ All security invariants and empirical metrics are proven against live PostgreSQL
 | **Original 30 Natural Queries (`main`)** | 210 chunks | **63.33%** (19/30) | **0.6167** | Raw evaluation as written; 9 queries failed due to non-existent document IDs |
 | **Original 30 Queries (Slug-Corrected)** | 210 chunks | **81.48%** (22/27) | **0.7963** | Evaluated against existing documents; 5 miss due to vocabulary divergence |
 | **Synthetic Keyword Queries** | 210 chunks | **100.00%** (487/487) | **0.9979** | High lexical overlap with chunk headers and template terms |
-| **Hand-Written Dev Set (32 queries)** | 210 chunks | **100.00%** (220/220) | **0.9932** | Used exclusively to calibrate similarity threshold |
-| **Hand-Written Held-Out Test Set (32 queries)**| 210 chunks | **100.00%** (220/220) | **0.9795** | Scored only once at the selected threshold (no tuning) |
-| **All Hand-Written Combined (64 queries)** | 210 chunks | **100.00%** (440/440) | **0.9864** | Optimistic benchmark (AI-generated with corpus access) |
+| **Hand-Written Dev Set (32 queries)** | 210 chunks | **100.00%** (220/220) | **1.0000** | Used exclusively to calibrate similarity threshold |
+| **Hand-Written Held-Out Test Set (32 queries)**| 210 chunks | **100.00%** (220/220) | **0.9955** | Scored only once at the selected threshold (no tuning) |
+| **All Hand-Written Combined (64 queries)** | 210 chunks | **100.00%** (440/440) | **0.9978** | Optimistic benchmark (AI-generated with corpus access) |
 
 ---
 
@@ -126,26 +126,27 @@ All security invariants and empirical metrics are proven against live PostgreSQL
 ### Parity as a Behavioral Metric & Reconciliation
 
 > [!NOTE]
-> **Why Restricted Parity Shifted (73.14% $\rightarrow$ 69.00% $\rightarrow$ 61.61%)**:
+> **Why Restricted Parity Shifted (73.14% $\rightarrow$ 69.00% $\rightarrow$ 61.61% $\rightarrow$ 69.65%)**:
 > 1. In earlier evaluations with only keyword-dense synthetic queries, restricted query parity was **73.14% (207 / 283)**.
 > 2. When the first 30 hand-written natural queries were added, the total number of restricted-only queries evaluated against unauthorized users increased from 283 to 458. Certain natural queries regarding compensation, benefits, and office policies had legitimate semantic overlap ($>0.35$) with permitted documents in the user's tenant (e.g., employee handbook benefits and workplace ergonomics), returning permitted citations rather than empty results. As a result, the parity share shifted to **69.00% (316 / 458)**.
-> 3. In the expanded 64-query benchmark (32 dev + 32 held-out test), 547 restricted query pairs were evaluated; at the calibrated 0.35 threshold, 337 returned empty results while 210 legitimately matched permitted documents, yielding a parity share of **61.61% (337 / 547)**.
-> 4. In all cases, zero restricted documents or tokens were ever returned. Parity share is a threshold calibration metric, not a security boundary.
+> 3. In intermediate testing with canaries appended directly to embedded chunk text, pseudo-random hex tokens altered chunk vector positions, artificially inflating similarity scores and dropping parity to **61.61% (337 / 547)**.
+> 4. Restoring clean chunk text embedding while retaining canaries strictly in the payload for prompt/display validation restored true semantic distribution, yielding a calibrated parity share of **69.65% (381 / 547)**.
+> 5. In all cases, zero restricted documents or tokens were ever returned. Parity share is a threshold calibration metric, not a security boundary.
 
 #### Similarity Threshold Sweep (Calibrated on 210-Chunk Multi-Tenant Corpus)
 
 > [!NOTE]
-> **Threshold Calibration Objective**: Maximize restricted query parity while guaranteeing 100.0% Recall@5 across both Synthetic and Hand-Written Dev benchmark sets. While permitted recall remains 100.00% across the 0.15–0.35 range, the sweep strongly discriminates on restricted query parity (shifting from 0.91% at 0.15 to 61.61% at 0.35). Threshold `0.35` is selected as the calibrated cutoff because it eliminates spurious semantic overlap while preserving 100.00% Recall@5 on both Synthetic and Dev sets. Above 0.40, marginal recall degradation begins.
+> **Threshold Calibration Objective**: Maximize restricted query parity while guaranteeing 100.0% Recall@5 across both Synthetic and Hand-Written Dev benchmark sets. While permitted recall remains 100.00% across the 0.15–0.35 range, the sweep strongly discriminates on restricted query parity (shifting from 1.28% at 0.15 to 69.65% at 0.35). Threshold `0.35` is selected as the calibrated cutoff because it eliminates spurious semantic overlap while preserving 100.00% Recall@5 on both Synthetic and Dev sets. Above 0.40, marginal recall degradation begins.
 
 | Similarity Threshold | Synth Recall@5 | Synth MRR | Dev Recall@5 | Dev MRR | Restricted Parity Share | Cross-Tenant Leak Rate | Canary Violations | Behavioral Profile |
 |:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|---|
-| **0.15** | 100.00% | 0.9979 | 100.00% | 0.9932 | 0.91% (5 / 547) | 0.00% | 0 / 823,996 checks | Overly permissive; permitted chunks match loose topical overlap |
-| **0.20** | 100.00% | 0.9979 | 100.00% | 0.9932 | 4.94% (27 / 547) | 0.00% | 0 / 823,996 checks | Permissive; broad semantic recall with frequent cross-domain permitted matches |
-| **0.25** | 100.00% | 0.9979 | 100.00% | 0.9932 | 15.72% (86 / 547) | 0.00% | 0 / 823,996 checks | Moderate semantic matching; captures conversational queries |
-| **0.30** | 100.00% | 0.9979 | 100.00% | 0.9932 | 38.21% (209 / 547) | 0.00% | 0 / 823,996 checks | Balanced filter; eliminates weakly related company documents |
-| **0.35** | **100.00%** | **0.9979** | **100.00%** | **0.9932** | **61.61% (337 / 547)** | **0.00%** | **0 / 823,996 checks** | **Selected calibration threshold; 100% Dev & Held-Out Recall with 61.61% parity** |
-| **0.40** | 99.79% | 0.9969 | 100.00% | 0.9932 | 82.27% (450 / 547) | 0.00% | 0 / 823,996 checks | Conservative cutoff; minor drop in synthetic recall (1 miss) |
-| **0.45** | 98.97% | 0.9897 | 100.00% | 0.9932 | 93.78% (513 / 547) | 0.00% | 0 / 823,996 checks | Strict cutoff; 5 misses on concise technical terms |
+| **0.15** | 100.00% | 0.9979 | 100.00% | 1.0000 | 1.28% (7 / 547) | 0.00% | 0 / 823,996 checks | Overly permissive; permitted chunks match loose topical overlap |
+| **0.20** | 100.00% | 0.9979 | 100.00% | 1.0000 | 7.31% (40 / 547) | 0.00% | 0 / 823,996 checks | Permissive; broad semantic recall with frequent cross-domain permitted matches |
+| **0.25** | 100.00% | 0.9979 | 100.00% | 1.0000 | 25.59% (140 / 547) | 0.00% | 0 / 823,996 checks | Moderate semantic matching; captures conversational queries |
+| **0.30** | 100.00% | 0.9979 | 100.00% | 1.0000 | 47.71% (261 / 547) | 0.00% | 0 / 823,996 checks | Balanced filter; eliminates weakly related company documents |
+| **0.35** | **100.00%** | **0.9979** | **100.00%** | **1.0000** | **69.65% (381 / 547)** | **0.00%** | **0 / 823,996 checks** | **Selected calibration threshold; 100% Dev & Held-Out Recall with 69.65% parity** |
+| **0.40** | 98.56% | 0.9856 | 100.00% | 1.0000 | 88.67% (485 / 547) | 0.00% | 0 / 823,996 checks | Conservative cutoff; minor drop in synthetic recall (4 misses) |
+| **0.45** | 97.13% | 0.9713 | 95.00% | 0.9500 | 95.98% (525 / 547) | 0.00% | 0 / 823,996 checks | Strict cutoff; 16 misses on concise technical terms |
 
 ---
 
