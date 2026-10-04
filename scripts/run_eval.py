@@ -13,11 +13,15 @@ import sys
 from hashlib import sha256
 from uuid import uuid4
 
+os.environ.setdefault("PERSISTENCE_BACKEND", "postgres")
+os.environ.setdefault("RUN_REAL_STACK", "1")
+os.environ.setdefault("VECTOR_BACKEND", "qdrant")
+
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import Session
 
-from app.api.state import state
+from app.api.state import User as StateUser, state
 from app.config import get_settings
 from app.core.permissions import ChunkACL, can_access
 from app.core.principal import Principal
@@ -25,7 +29,7 @@ from app.core.security import create_access_token
 from app.db.models import Chunk, Document, Role, Tenant, User
 from app.main import app
 from app.rag.vectorstore.qdrant_store import QdrantVectorStore
-from app.rag.vectorstore.tenant_scoped_retriever import VectorChunk
+from app.rag.vectorstore.tenant_scoped_retriever import TenantScopedRetriever, VectorChunk
 
 
 # ---------------------------------------------------------------------------
@@ -492,43 +496,88 @@ UNRELATED_QUERIES = [
     "stellar nucleosynthesis and iron peak elemental abundance",
 ]
 
-HANDWRITTEN_QUERIES = [
-    # HR & Employee Care
-    ("employee-handbook-leave", "How much paid vacation and sick leave do new employees receive each year?", {"employee", "hr", "admin"}, "internal"),
-    ("employee-handbook", "What kind of medical, dental, and health coverage is provided by the company?", {"employee", "hr", "admin"}, "internal"),
-    ("employee-handbook", "Where can I read about our workplace code of conduct and ethics policy?", {"employee", "hr", "admin"}, "internal"),
-    ("performance-review-guidelines", "When and how do our annual performance evaluation reviews take place?", {"employee", "hr", "admin"}, "internal"),
-    ("performance-review-guidelines", "Can team members submit anonymous peer 360 feedback before reviews?", {"employee", "hr", "admin"}, "internal"),
-    ("salary-bands-2026", "How much base pay do staff software engineers make according to the salary guidelines?", {"hr", "admin"}, "restricted"),
-    ("salary-bands-2026", "What is the bonus and commission structure for enterprise sales reps?", {"hr", "admin"}, "restricted"),
-    ("executive-compensation-retention", "What happens to stock options if the company gets acquired or changes control?", {"hr", "admin"}, "restricted"),
-    ("executive-compensation-retention", "What is the standard severance payout for departing senior executives?", {"hr", "admin"}, "restricted"),
-    # Finance & Budgeting
-    ("quarterly-financial-forecast", "What are the projected profit margins and revenue growth expectations for this quarter?", {"finance", "admin"}, "confidential"),
-    ("quarterly-financial-forecast", "How much money has been budgeted for expanding our cloud infrastructure and server clusters?", {"finance", "admin"}, "confidential"),
-    ("annual-budget-allocation", "What is the deadline for submitting corporate tax filings and revenue statements?", {"finance", "admin"}, "confidential"),
-    ("annual-budget-allocation", "How many new engineering roles are approved for hiring in the upcoming fiscal year?", {"finance", "admin"}, "confidential"),
-    # Engineering & Security
-    ("disaster-recovery-protocol", "What is the maximum allowed downtime before our disaster recovery systems must be back online?", {"engineering", "admin"}, "confidential"),
-    ("disaster-recovery-protocol", "How frequently are offsite data backups replicated to secondary regions?", {"engineering", "admin"}, "confidential"),
-    ("incident-response-playbook", "What are the mandatory security steps for handling an ongoing data breach or intrusion?", {"engineering", "admin"}, "confidential"),
-    ("incident-response-playbook", "How often are developers required to rotate API keys and database credentials?", {"engineering", "admin"}, "confidential"),
-    ("architecture-standards", "What are our architectural requirements for encrypting data while in transit and at rest?", {"engineering", "admin"}, "confidential"),
-    ("architecture-standards", "Which programming languages and microservice frameworks are recommended for new backend services?", {"engineering", "admin"}, "confidential"),
-    # Legal, Compliance & Privacy
-    ("corporate-legal-nda", "Does the company own patents and intellectual property invented by engineers on company time?", {"admin"}, "restricted"),
-    ("corporate-legal-nda", "How long do confidentiality restrictions remain in effect after an agreement ends?", {"admin"}, "restricted"),
-    ("vendor-contract-terms", "What are the uptime service level agreement requirements for our third-party software vendors?", {"legal", "finance", "admin"}, "confidential"),
-    ("customer-privacy-gdpr", "What is the official procedure for processing customer GDPR data deletion requests?", {"legal", "admin"}, "confidential"),
-    ("mergers-acquisitions-strategy", "What criteria do we use when evaluating early-stage AI startups for potential corporate buyout?", {"admin"}, "restricted"),
-    ("mergers-acquisitions-strategy", "How do technical and financial due diligence teams audit target liabilities before an acquisition?", {"admin"}, "restricted"),
-    # Operations, Marketing, Product & Sales
-    ("office-security-policy", "What are the standard working hours and badge access rules for physical office buildings?", {"employee", "admin"}, "internal"),
-    ("travel-expense-policy", "How do employees submit reimbursement requests for business travel and client dinners?", {"employee", "finance", "admin"}, "internal"),
-    ("brand-marketing-guidelines", "What is the required approval workflow before publishing articles on the public engineering blog?", {"employee", "admin"}, "internal"),
-    ("product-launch-playbook", "What metrics and KPIs are tracked during the beta rollout of a new software product feature?", {"engineering", "admin"}, "internal"),
-    ("sales-discount-matrix", "Who has permission to grant enterprise customers discounted annual pricing tiers?", {"sales", "finance", "admin"}, "confidential"),
+HANDWRITTEN_DEV_QUERIES = [
+    # 1. Human Resources & Compensation
+    ("employee-handbook", "How many vacation days and sick leave do full-time staff get per calendar year?"),
+    ("salary-bands-2026", "What is the target base salary compensation for a staff level engineer?"),
+    ("performance-review-guidelines", "When do the mid-year and year-end performance review cycles take place?"),
+    ("executive-compensation-retention", "What happens to C-suite equity grants if our business is acquired by another firm?"),
+    ("employee-handbook", "Where is our corporate code of ethics documented regarding gifts and conflicts?"),
+    # 2. Finance & Accounting
+    ("quarterly-financial-forecast", "What are our projected gross profit margins and revenue growth rates for the quarter?"),
+    ("annual-budget-allocation", "Which corporate departments receive the largest budget allocation this fiscal year?"),
+    ("travel-expense-policy", "Are employees allowed to book business class tickets for short domestic flights?"),
+    ("corporate-tax-strategy", "How much federal tax liability do our research and development tax credits offset?"),
+    ("quarterly-financial-forecast", "By how much are we planning to decrease redundant software vendor expenditures?"),
+    # 3. Engineering & Infrastructure
+    ("engineering-architecture", "Which remote procedure call protocol do our internal microservices use to communicate?"),
+    ("production-deployment-runbook", "What percentage of live user traffic is routed to canary releases during deployment?"),
+    ("disaster-recovery-protocol", "What is our official recovery point objective for database write-ahead log replication?"),
+    ("api-security-standards", "What JWT signing algorithm is mandated for verifying OAuth2 tokens on API endpoints?"),
+    # 4. Legal & Compliance
+    ("corporate-legal-nda", "Who owns the patents and intellectual property developed by workers during employment?"),
+    ("vendor-contract-terms", "Do standard vendor master services contracts require mutual IP indemnification clauses?"),
+    ("customer-privacy-gdpr", "Within how many days must customer personal data erasure requests be fulfilled?"),
+    ("compliance-audit-checklist", "What security controls and access logs are evaluated during the annual SOC 2 Type II audit?"),
+    # 5. Operations & Facilities
+    ("office-facilities-guide", "What should an employee do if they lose their building security access keycard?"),
+    ("it-helpdesk-provisioning", "What is the default laptop model issued to software developers upon joining?"),
+    ("procurement-standards-a", "What manager approvals are needed before buying computer hardware under five thousand dollars?"),
+    ("procurement-standards-b", "Who must review and sign off on enterprise software subscriptions over ten thousand dollars?"),
+    ("vendor-security-assessment-part1", "What security reports and penetration tests are evaluated for new cloud vendors?"),
+    ("vendor-security-assessment-part2", "Within what timeframe must SaaS partners inform our security team of a data breach?"),
+    ("workplace-ergonomics", "How much home office ergonomic allowance can remote staff claim for chairs and desks?"),
+    ("corporate-social-responsibility", "What year has the organization targeted for reaching net-zero carbon emissions?"),
+    ("incident-response-alpha", "How fast must an emergency bridge be opened after a severity 1 outage begins?"),
+    ("incident-response-beta", "When must the postmortem root cause writeup be finished following an incident resolution?"),
+    ("customer-support-tier1", "What is the initial response time SLA for standard customer support tickets?"),
+    ("customer-support-tier2", "After how many hours of investigation does an unresolved ticket get handed off to Tier 2?"),
+    ("product-roadmap-horizon", "Which search and inference capabilities are scheduled for delivery in the next two quarters?"),
+    ("mergers-acquisitions-strategy", "What stage AI startups are prioritized for potential corporate acquisitions?"),
 ]
+
+HANDWRITTEN_TEST_QUERIES = [
+    # 1. Human Resources & Compensation
+    ("employee-handbook", "What dental and medical plans are available to regular employees through our network?"),
+    ("salary-bands-2026", "What is the baseline salary and annual bonus target for an executive vice president?"),
+    ("performance-review-guidelines", "Can peers submit 360 degree feedback directly through the online employee portal?"),
+    ("executive-compensation-retention", "What is the standard severance payout terms in executive golden parachute agreements?"),
+    ("employee-handbook", "What is the accrual policy for annual paid time off and parental leave?"),
+    # 2. Finance & Accounting
+    ("quarterly-financial-forecast", "How much capital expenditure is earmarked for building out new data center capacity?"),
+    ("annual-budget-allocation", "How many net-new software engineering headcount positions are budgeted for next year?"),
+    ("travel-expense-policy", "What is the maximum reimbursement allowed per night for city hotel bookings?"),
+    ("corporate-tax-strategy", "What valuation principles govern intercompany transfer pricing across subsidiaries?"),
+    ("quarterly-financial-forecast", "What are the key financial drivers influencing our quarterly margin forecast?"),
+    # 3. Engineering & Infrastructure
+    ("engineering-architecture", "How does our distributed PostgreSQL database manage automated node failovers?"),
+    ("production-deployment-runbook", "What automated checks will trigger an instant rollback to the previous blue-green release?"),
+    ("disaster-recovery-protocol", "How quickly must critical application services be fully restored after a major outage?"),
+    ("api-security-standards", "What is the maximum unauthenticated request rate allowed per IP address by the gateway?"),
+    # 4. Legal & Compliance
+    ("corporate-legal-nda", "How many years do non-disclosure obligations last once a commercial contract ends?"),
+    ("vendor-contract-terms", "What is the minimum service uptime percentage vendors must guarantee without penalties?"),
+    ("customer-privacy-gdpr", "Who serves as the corporate data protection officer responsible for regulatory filings?"),
+    ("compliance-audit-checklist", "What documentation does our ISO 27001 information security certification require?"),
+    # 5. Operations & Facilities
+    ("office-facilities-guide", "How are subterranean garage parking permits and EV charging spaces assigned?"),
+    ("it-helpdesk-provisioning", "What authentication mechanism is required when requesting an IT password reset?"),
+    ("procurement-standards-a", "When is a written justification required to select a single vendor without bidding?"),
+    ("procurement-standards-b", "How many qualified vendor price quotes are required for a competitive RFP bidding process?"),
+    ("vendor-security-assessment-part1", "What encryption standards must third-party SaaS vendors enforce for stored user data?"),
+    ("vendor-security-assessment-part2", "What happens to vendor API keys and credential tokens when a vendor contract terminates?"),
+    ("workplace-ergonomics", "Who performs virtual assessments of employee ergonomic workstation setups?"),
+    ("corporate-social-responsibility", "How many paid volunteer hours are employees granted annually for community service?"),
+    ("incident-response-alpha", "How frequently must customer status page updates be posted during ongoing incidents?"),
+    ("incident-response-beta", "How soon do engineering remediation tickets from postmortems have to be scheduled in sprints?"),
+    ("customer-support-tier1", "How quickly are Tier 1 technical support tickets sorted by the automated triage system?"),
+    ("customer-support-tier2", "Where are validated customer software bugs logged so engineers can investigate them?"),
+    ("product-roadmap-horizon", "What granular authorization capabilities are planned for upcoming enterprise product releases?"),
+    ("mergers-acquisitions-strategy", "What legal and debt liabilities are examined during technical due diligence audits?"),
+]
+
+HANDWRITTEN_QUERIES = HANDWRITTEN_DEV_QUERIES + HANDWRITTEN_TEST_QUERIES
+
 
 CANARIES: dict[str, dict[str, object]] = {}
 CORPUS_DOCS: dict[str, dict] = {}
@@ -598,6 +647,14 @@ def seed_large_eval_corpus(settings) -> None:
                 active=True,
                 roles=roles,
             ))
+            state.users[u_id] = StateUser(
+                u_id,
+                t_id,
+                f"eval-{uuid4().hex}",
+                frozenset(roles),
+                clearance,
+                True,
+            )
         session.commit()
 
         # 4. Documents & Chunks with Canary Tokens for Restricted Docs
@@ -667,6 +724,8 @@ def seed_large_eval_corpus(settings) -> None:
         session.commit()
 
     vector_store.upsert(points)
+    state.vector_store = vector_store
+    state.retriever = TenantScopedRetriever(backend=vector_store)
 
 
 # ---------------------------------------------------------------------------
@@ -686,6 +745,12 @@ def run_evaluation_sweep(client, tokens, user_meta, eval_matrix, doc_meta, chunk
     synthetic_permitted_count = 0
     synthetic_recall_hits = 0
     synthetic_rr_sum = 0.0
+    dev_permitted_count = 0
+    dev_recall_hits = 0
+    dev_rr_sum = 0.0
+    test_permitted_count = 0
+    test_recall_hits = 0
+    test_rr_sum = 0.0
     handwritten_permitted_count = 0
     handwritten_recall_hits = 0
     handwritten_rr_sum = 0.0
@@ -769,8 +834,17 @@ def run_evaluation_sweep(client, tokens, user_meta, eval_matrix, doc_meta, chunk
 
         if is_permitted:
             permitted_count += 1
-            is_hw = (q_spec.get("set") == "handwritten")
-            if is_hw:
+            q_set = q_spec.get("set", "")
+            is_dev = (q_set == "handwritten_dev")
+            is_test = (q_set == "handwritten_test")
+            is_hw = is_dev or is_test or (q_set == "handwritten")
+            if is_dev:
+                dev_permitted_count += 1
+                handwritten_permitted_count += 1
+            elif is_test:
+                test_permitted_count += 1
+                handwritten_permitted_count += 1
+            elif is_hw:
                 handwritten_permitted_count += 1
             else:
                 synthetic_permitted_count += 1
@@ -781,7 +855,17 @@ def run_evaluation_sweep(client, tokens, user_meta, eval_matrix, doc_meta, chunk
                 recall_hits += 1
                 rank = retrieved_doc_ids.index(target_id) + 1
                 rr_sum += 1.0 / rank
-                if is_hw:
+                if is_dev:
+                    dev_recall_hits += 1
+                    dev_rr_sum += 1.0 / rank
+                    handwritten_recall_hits += 1
+                    handwritten_rr_sum += 1.0 / rank
+                elif is_test:
+                    test_recall_hits += 1
+                    test_rr_sum += 1.0 / rank
+                    handwritten_recall_hits += 1
+                    handwritten_rr_sum += 1.0 / rank
+                elif is_hw:
                     handwritten_recall_hits += 1
                     handwritten_rr_sum += 1.0 / rank
                 else:
@@ -796,7 +880,7 @@ def run_evaluation_sweep(client, tokens, user_meta, eval_matrix, doc_meta, chunk
                     "query": q_spec["question"],
                     "target_doc_id": target_id,
                     "retrieved_results": citations,
-                    "set": "handwritten" if is_hw else "synthetic",
+                    "set": q_set,
                 })
 
         # 4. Restricted-only queries evaluation (same tenant, but lacking role/clearance)
@@ -828,6 +912,10 @@ def run_evaluation_sweep(client, tokens, user_meta, eval_matrix, doc_meta, chunk
 
     synthetic_recall_at_5 = (synthetic_recall_hits / synthetic_permitted_count * 100.0) if synthetic_permitted_count else 0.0
     synthetic_mrr = (synthetic_rr_sum / synthetic_permitted_count) if synthetic_permitted_count else 0.0
+    dev_recall_at_5 = (dev_recall_hits / dev_permitted_count * 100.0) if dev_permitted_count else 0.0
+    dev_mrr = (dev_rr_sum / dev_permitted_count) if dev_permitted_count else 0.0
+    test_recall_at_5 = (test_recall_hits / test_permitted_count * 100.0) if test_permitted_count else 0.0
+    test_mrr = (test_rr_sum / test_permitted_count) if test_permitted_count else 0.0
     handwritten_recall_at_5 = (handwritten_recall_hits / handwritten_permitted_count * 100.0) if handwritten_permitted_count else 0.0
     handwritten_mrr = (handwritten_rr_sum / handwritten_permitted_count) if handwritten_permitted_count else 0.0
 
@@ -846,6 +934,14 @@ def run_evaluation_sweep(client, tokens, user_meta, eval_matrix, doc_meta, chunk
         "synthetic_recall_hits": synthetic_recall_hits,
         "synthetic_recall_at_5": synthetic_recall_at_5,
         "synthetic_mrr": synthetic_mrr,
+        "dev_permitted_count": dev_permitted_count,
+        "dev_recall_hits": dev_recall_hits,
+        "dev_recall_at_5": dev_recall_at_5,
+        "dev_mrr": dev_mrr,
+        "test_permitted_count": test_permitted_count,
+        "test_recall_hits": test_recall_hits,
+        "test_recall_at_5": test_recall_at_5,
+        "test_mrr": test_mrr,
         "handwritten_permitted_count": handwritten_permitted_count,
         "handwritten_recall_hits": handwritten_recall_hits,
         "handwritten_recall_at_5": handwritten_recall_at_5,
@@ -1104,9 +1200,11 @@ def main() -> None:
             "set": "unrelated",
         })
 
-    # D. Hand-written natural queries (30 prompts x 3 tenants)
+    # D. Hand-written natural queries (32 dev + 32 held-out test x 3 tenants)
+    doc_template_map = {t[0]: (t[2], t[3]) for t in EVAL_DOC_TEMPLATES}
     for target_tenant in {"acme-corp", "globex-inc", "initech-llc"}:
-        for doc_slug, question, allowed_roles, sensitivity in HANDWRITTEN_QUERIES:
+        for doc_slug, question in HANDWRITTEN_DEV_QUERIES:
+            allowed_roles, sensitivity = doc_template_map[doc_slug]
             target_doc_id = f"{target_tenant}:{doc_slug}"
             query_catalog.append({
                 "question": question,
@@ -1115,7 +1213,19 @@ def main() -> None:
                 "allowed_roles": allowed_roles,
                 "sensitivity": sensitivity,
                 "type": "targeted",
-                "set": "handwritten",
+                "set": "handwritten_dev",
+            })
+        for doc_slug, question in HANDWRITTEN_TEST_QUERIES:
+            allowed_roles, sensitivity = doc_template_map[doc_slug]
+            target_doc_id = f"{target_tenant}:{doc_slug}"
+            query_catalog.append({
+                "question": question,
+                "target_tenant": target_tenant,
+                "target_doc_id": target_doc_id,
+                "allowed_roles": allowed_roles,
+                "sensitivity": sensitivity,
+                "type": "targeted",
+                "set": "handwritten_test",
             })
 
     # Build matrix across 11 users
@@ -1155,7 +1265,7 @@ def main() -> None:
     print(f"  Embedding Model Used     : {settings.embedding_model_name} (provider: {settings.embedding_provider})")
     print("=" * 75 + "\n")
 
-    thresholds_to_test = [0.25, 0.30, 0.35, 0.40, 0.45]
+    thresholds_to_test = [0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45]
     results = {}
 
     try:
@@ -1165,35 +1275,55 @@ def main() -> None:
             res = run_evaluation_sweep(client, tokens, user_meta, eval_matrix, doc_meta, chunk_meta, thresh, prompt_spy)
             results[thresh] = res
 
-        print("\n" + "=" * 90)
-        print("                        THRESHOLD SENSITIVITY & TRADE-OFF SWEEP                         ")
-        print("=" * 90)
-        print(f"{'Threshold':<11} | {'Recall@5':<10} | {'MRR':<8} | {'Parity Share':<18} | {'Leak Rate':<10} | {'Canary Violations'}")
-        print("-" * 90)
+        print("\n" + "=" * 115)
+        print("                  THRESHOLD SENSITIVITY & TRADE-OFF SWEEP (SYNTHETIC VS HAND-WRITTEN DEV)                  ")
+        print("=" * 115)
+        print(f"{'Threshold':<10} | {'Synth R@5':<10} | {'Synth MRR':<10} | {'Dev R@5':<10} | {'Dev MRR':<10} | {'Parity Share':<18} | {'Leak Rate':<10} | {'Canary Violations'}")
+        print("-" * 115)
         for thresh in thresholds_to_test:
             r = results[thresh]
             parity_str = f"{r['parity_share']:.2f}% ({r['restricted_no_results_count']}/{r['restricted_count']})"
-            recall_str = f"{r['recall_at_5']:.2f}%"
-            mrr_str = f"{r['mrr']:.4f}"
+            s_recall_str = f"{r['synthetic_recall_at_5']:.2f}%"
+            s_mrr_str = f"{r['synthetic_mrr']:.4f}"
+            d_recall_str = f"{r['dev_recall_at_5']:.2f}%"
+            d_mrr_str = f"{r['dev_mrr']:.4f}"
             leak_str = f"{r['leak_rate']:.2f}%"
             canary_str = f"{r['canary_violations']} / {r['canary_checks']} checks"
-            print(f"{thresh:<11.2f} | {recall_str:<10} | {mrr_str:<8} | {parity_str:<18} | {leak_str:<10} | {canary_str}")
-        print("=" * 90 + "\n")
+            print(f"{thresh:<10.2f} | {s_recall_str:<10} | {s_mrr_str:<10} | {d_recall_str:<10} | {d_mrr_str:<10} | {parity_str:<18} | {leak_str:<10} | {canary_str}")
+        print("=" * 115 + "\n")
 
-        # Synthetic vs Hand-Written Breakdown at calibrated threshold 0.35
-        r_calibrated = results[0.35]
-        print("\n" + "=" * 75)
-        print("        EVALUATION BREAKDOWN: SYNTHETIC VS HAND-WRITTEN SETS         ")
-        print("=" * 75)
-        print("  Synthetic Query Set:")
-        print(f"    Permitted Queries Evaluated : {r_calibrated['synthetic_permitted_count']}")
-        print(f"    Recall@5                   : {r_calibrated['synthetic_recall_at_5']:.2f}%")
-        print(f"    MRR                        : {r_calibrated['synthetic_mrr']:.4f}")
-        print("\n  Hand-Written Query Set (Natural Phrasing):")
-        print(f"    Permitted Queries Evaluated : {r_calibrated['handwritten_permitted_count']}")
-        print(f"    Recall@5                   : {r_calibrated['handwritten_recall_at_5']:.2f}%")
-        print(f"    MRR                        : {r_calibrated['handwritten_mrr']:.4f}")
-        print("=" * 75)
+        # Threshold calibration selection from Hand-Written Dev Set
+        # Objective: Maximize Dev Recall@5 while maintaining restricted parity >= 60%
+        valid_thresholds = [t for t in thresholds_to_test if results[t]["parity_share"] >= 60.0]
+        calibrated_thresh = max(valid_thresholds, key=lambda t: (results[t]["dev_recall_at_5"], results[t]["dev_mrr"], -abs(t - 0.30)))
+        print(f"CALIBRATION DECISION (from Dev Set): Selected Threshold = {calibrated_thresh:.2f}")
+        print(f"Objective: Maximize Hand-Written Dev Recall@5 while maintaining restricted query parity >= 60.0%.")
+
+        r_calibrated = results[calibrated_thresh]
+        print("\n" + "=" * 85)
+        print(f"        EVALUATION BREAKDOWN AT CALIBRATED THRESHOLD {calibrated_thresh:.2f} (WITH HELD-OUT TEST SET)         ")
+        print("=" * 85)
+        print("  1. Synthetic Query Set (Keyword-dense benchmark):")
+        print(f"     Permitted Queries Evaluated : {r_calibrated['synthetic_permitted_count']}")
+        print(f"     Recall@5                   : {r_calibrated['synthetic_recall_at_5']:.2f}%")
+        print(f"     MRR                        : {r_calibrated['synthetic_mrr']:.4f}")
+        print("\n  2. Hand-Written Dev Set (32 queries, used to calibrate threshold):")
+        print(f"     Permitted Queries Evaluated : {r_calibrated['dev_permitted_count']}")
+        print(f"     Recall@5                   : {r_calibrated['dev_recall_at_5']:.2f}%")
+        print(f"     MRR                        : {r_calibrated['dev_mrr']:.4f}")
+        print("\n  3. Hand-Written Held-Out Test Set (32 queries, scored only at chosen threshold):")
+        print(f"     Permitted Queries Evaluated : {r_calibrated['test_permitted_count']}")
+        print(f"     Recall@5                   : {r_calibrated['test_recall_at_5']:.2f}%")
+        print(f"     MRR                        : {r_calibrated['test_mrr']:.4f}")
+        print("\n  4. All Hand-Written Queries Combined (64 queries):")
+        print(f"     Permitted Queries Evaluated : {r_calibrated['handwritten_permitted_count']}")
+        print(f"     Recall@5                   : {r_calibrated['handwritten_recall_at_5']:.2f}%")
+        print(f"     MRR                        : {r_calibrated['handwritten_mrr']:.4f}")
+        print("\n  5. Overall Permitted Queries (Synthetic + All Hand-Written):")
+        print(f"     Permitted Queries Evaluated : {r_calibrated['permitted_count']}")
+        print(f"     Recall@5                   : {r_calibrated['recall_at_5']:.2f}%")
+        print(f"     MRR                        : {r_calibrated['mrr']:.4f}")
+        print("=" * 85)
 
         # Canary Assertion Breakdown
         print("\n" + "=" * 75)
@@ -1209,9 +1339,9 @@ def main() -> None:
         print(f"  Canary Violations Detected       : {r_calibrated['canary_violations']} (0.00%)")
         print("=" * 75)
 
-        # Requirement 1: Counterfactual Test (evaluated at calibrated threshold 0.35)
-        print("\nRunning Counterfactual Existence Test (World 1 vs World 2)...")
-        cf_res = run_counterfactual_test(client, tokens, user_meta, eval_matrix, settings, threshold=0.35, baseline_responses=results[0.35]["responses"])
+        # Requirement 1: Counterfactual Test (evaluated at calibrated threshold)
+        print(f"\nRunning Counterfactual Existence Test (World 1 vs World 2 at threshold {calibrated_thresh:.2f})...")
+        cf_res = run_counterfactual_test(client, tokens, user_meta, eval_matrix, settings, threshold=calibrated_thresh, baseline_responses=results[calibrated_thresh]["responses"])
         print("\n" + "=" * 80)
         print("         COUNTERFACTUAL INVARIANCE TEST RESULTS (EVERY PRINCIPAL)         ")
         print("=" * 80)
@@ -1251,7 +1381,7 @@ def main() -> None:
         print("\n" + "=" * 75)
         print("  5 EXAMPLE RESTRICTED QUERIES RETURNING CITATIONS TO PERMITTED DOCS  ")
         print("=" * 75)
-        mismatches_with_citations = [m for m in results[0.35]["parity_mismatches"] if m["citations"]]
+        mismatches_with_citations = [m for m in results[calibrated_thresh]["parity_mismatches"] if m["citations"]]
         for idx, ex in enumerate(mismatches_with_citations[:5], 1):
             print(f"\n[{idx}] User: {ex['user']} (Roles: {ex['roles']}, Tenant: {ex['tenant']})")
             print(f"    Restricted Target: {ex['target_doc']}")
@@ -1259,7 +1389,7 @@ def main() -> None:
             print("    Legitimate Permitted Citations Returned:")
             for cit in ex["citations"]:
                 print(f"      - doc_id: {cit['doc_id']}, chunk_id: {cit['chunk_id']}, score: {cit.get('score')}")
-            print(f"    Why Legitimate: The user lacks clearance for '{ex['target_doc']}', but semantic search matched permitted documents in their tenant above the 0.35 threshold.")
+            print(f"    Why Legitimate: The user lacks clearance for '{ex['target_doc']}', but semantic search matched permitted documents in their tenant above the {calibrated_thresh:.2f} threshold.")
 
         # Requirement 3: Detailed Missed Recall@5 Diagnostic
         for diag_thresh in [0.35, 0.40, 0.45]:
