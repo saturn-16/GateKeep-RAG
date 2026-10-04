@@ -135,10 +135,7 @@ All security invariants and empirical metrics are proven against live PostgreSQL
 #### Similarity Threshold Sweep (Calibrated on 210-Chunk Multi-Tenant Corpus)
 
 > [!NOTE]
-> **Threshold Calibration Objective & Non-Discrimination Interval**:
-> - **Objective**: Maximize restricted query parity while guaranteeing 100.0% Recall@5 across both Synthetic and Dev benchmark sets.
-> - **Selected Threshold**: `0.35` (achieves 61.61% restricted query parity while preserving 100.0% recall).
-> - **Non-Discrimination Notice**: On this 210-chunk corporate corpus, the cosine similarity sweep **does not discriminate between 0.15 and 0.35** on permitted recall (all relevant chunks score $\ge 0.40$, while completely unrelated queries score $< 0.15$). At 0.40+, marginal recall degradation begins (e.g. query "headcount hiring plan budget" drops below 0.40).
+> **Threshold Calibration Objective**: Maximize restricted query parity while guaranteeing 100.0% Recall@5 across both Synthetic and Hand-Written Dev benchmark sets. While permitted recall remains 100.00% across the 0.15–0.35 range, the sweep strongly discriminates on restricted query parity (shifting from 0.91% at 0.15 to 61.61% at 0.35). Threshold `0.35` is selected as the calibrated cutoff because it eliminates spurious semantic overlap while preserving 100.00% Recall@5 on both Synthetic and Dev sets. Above 0.40, marginal recall degradation begins.
 
 | Similarity Threshold | Synth Recall@5 | Synth MRR | Dev Recall@5 | Dev MRR | Restricted Parity Share | Cross-Tenant Leak Rate | Canary Violations | Behavioral Profile |
 |:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|---|
@@ -156,6 +153,9 @@ All security invariants and empirical metrics are proven against live PostgreSQL
 
 > [!WARNING]
 > **Demo-Only Credentials & Secrets Replacement**: All personas below (`alice`/`alice`, `bob`/`bob`, etc.) and default service credentials (such as `gatekeep:gatekeep` and default JWT secrets) are seeded strictly for local sandbox demonstration, test suites, and offline evaluation. In any staging or production deployment, default credentials and static database passwords must be replaced by strong, dynamically provisioned secrets managed via a dedicated secrets store (such as AWS Secrets Manager or HashiCorp Vault).
+
+> [!IMPORTANT]
+> **Password Hash Migration & Reset Notice**: The password hashing format has been upgraded to explicitly encode scrypt parameters (`scrypt$<N>$<r>$<p>$<salt>$<digest>`) with strict parameter caps ($N \le 2^{18}$, $r \le 16$, $p \le 4$) and blind parameter fallbacks have been eliminated. Any pre-existing user accounts created under earlier unparameterized hash formats cannot be verified and require an administrative password reset.
 
 | Username | Password | Tenant | Roles | Clearance | Description |
 |---|---|---|---|---|---|

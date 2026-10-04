@@ -23,6 +23,11 @@ def test_password_and_token_round_trip() -> None:
     assert not verify_password("pass", "scrypt$16384$8$salt$digest")
     assert not verify_password("pass", "scrypt$0$8$1$salt$digest")
 
+    # Reject out-of-bounds parameters (N > 2^18, r > 16, p > 4)
+    assert not verify_password("pass", f"scrypt${2**19}$8$1$salt$digest")
+    assert not verify_password("pass", "scrypt$131072$17$1$salt$digest")
+    assert not verify_password("pass", "scrypt$131072$8$5$salt$digest")
+
     token = create_access_token({"sub": "alice", "tenant_id": "acme", "roles": ["admin"]}, "test", 60)
     assert decode_access_token(token, "test")["sub"] == "alice"
 

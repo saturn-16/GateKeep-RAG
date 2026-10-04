@@ -29,7 +29,8 @@ def verify_password(password: str, encoded: str) -> bool:
         n = int(parts[1])
         r = int(parts[2])
         p = int(parts[3])
-        if n <= 1 or r <= 0 or p <= 0:
+        # Reject out-of-bounds parameters to protect against DoS via maliciously crafted hashes
+        if n <= 1 or n > 2**18 or r <= 0 or r > 16 or p <= 0 or p > 4:
             return False
         salt = _unb64(parts[4])
         expected = _unb64(parts[5])
