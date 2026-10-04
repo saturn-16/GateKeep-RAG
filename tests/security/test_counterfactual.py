@@ -15,11 +15,12 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import Session
 
+from app.api.state import state
 from app.config import get_settings
 from app.core.permissions import ChunkACL, can_access
 from app.core.principal import Principal
 from app.core.security import create_access_token
-from app.db.models import Chunk, Document, Role, Tenant, User
+from app.db.models import AuditLog, Chunk, Document, Role, Tenant, User
 from app.main import app
 from app.rag.vectorstore.qdrant_store import QdrantVectorStore
 from app.rag.vectorstore.tenant_scoped_retriever import VectorChunk
@@ -305,9 +306,19 @@ def test_counterfactual_every_principal_invariance() -> None:
             # Baseline: Run all queries in World 1 (all documents present)
             w1_responses = {}
             for q in queries:
+                # Security Invariant 2: Qdrant pre-filter must never leak unauthorized chunks
+                raw_chunks = state.retriever.search(principal, q["question"], top_k=5)
+                for rc in raw_chunks:
+                    assert can_access(principal, rc.acl), f"Qdrant pre-filter leaked chunk {rc.acl.chunk_id} to unauthorized principal {u_id}"
+
                 resp = client.post("/v1/query", headers={"Authorization": f"Bearer {tokens[u_id]}"}, json=q)
                 assert resp.status_code == 200
                 w1_responses[q["question"]] = resp.json()
+
+            # Security Invariant 3: Zero post-retrieval security alerts triggered during normal query
+            with Session(engine) as s:
+                alerts = s.scalars(select(AuditLog).where(AuditLog.tenant_id == t_id, AuditLog.action == "security_alert")).all()
+                assert len(alerts) == 0, f"Post-retrieval security alert triggered for {u_id}: {alerts}"
 
             # Identify documents this principal CANNOT access
             unauthorized_doc_ids = []
