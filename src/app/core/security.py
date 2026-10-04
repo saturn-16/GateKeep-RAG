@@ -17,17 +17,25 @@ def _unb64(value: str) -> bytes:
 
 def hash_password(password: str) -> str:
     salt = os.urandom(16)
-    digest = hashlib.scrypt(password.encode(), salt=salt, n=2**14, r=8, p=1)
+    digest = hashlib.scrypt(password.encode(), salt=salt, n=2**17, r=8, p=1, maxmem=256 * 1024 * 1024)
     return f"scrypt${_b64(salt)}${_b64(digest)}"
 
 
 def verify_password(password: str, encoded: str) -> bool:
     try:
-        algorithm, salt, expected = encoded.split("$", 2)
-        if algorithm != "scrypt":
+        parts = encoded.split("$")
+        if parts[0] != "scrypt":
             return False
-        actual = hashlib.scrypt(password.encode(), salt=_unb64(salt), n=2**14, r=8, p=1)
-        return hmac.compare_digest(actual, _unb64(expected))
+        if len(parts) == 3:
+            _, salt_b64, expected_b64 = parts
+            # First try calibrated production parameter N=2^17 (131072, r=8, p=1, 128MB RAM)
+            actual = hashlib.scrypt(password.encode(), salt=_unb64(salt_b64), n=2**17, r=8, p=1, maxmem=256 * 1024 * 1024)
+            if hmac.compare_digest(actual, _unb64(expected_b64)):
+                return True
+            # Backward-compatible fallback for legacy demo fixtures created with N=2^14
+            legacy = hashlib.scrypt(password.encode(), salt=_unb64(salt_b64), n=2**14, r=8, p=1, maxmem=256 * 1024 * 1024)
+            return hmac.compare_digest(legacy, _unb64(expected_b64))
+        return False
     except (ValueError, TypeError):
         return False
 

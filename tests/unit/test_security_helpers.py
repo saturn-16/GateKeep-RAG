@@ -10,6 +10,16 @@ def test_password_and_token_round_trip() -> None:
     assert encoded.startswith("scrypt$")
     assert verify_password("correct horse battery staple", encoded)
     assert not verify_password("wrong", encoded)
+
+    # Verify backward-compatibility fallback with legacy N=2^14 fixture
+    import hashlib, os
+    from app.core.security import _b64
+    legacy_salt = os.urandom(16)
+    legacy_digest = hashlib.scrypt(b"legacy_pass", salt=legacy_salt, n=2**14, r=8, p=1)
+    legacy_encoded = f"scrypt${_b64(legacy_salt)}${_b64(legacy_digest)}"
+    assert verify_password("legacy_pass", legacy_encoded)
+    assert not verify_password("wrong", legacy_encoded)
+
     token = create_access_token({"sub": "alice", "tenant_id": "acme", "roles": ["admin"]}, "test", 60)
     assert decode_access_token(token, "test")["sub"] == "alice"
 
