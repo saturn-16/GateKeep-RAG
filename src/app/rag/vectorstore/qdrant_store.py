@@ -33,7 +33,8 @@ class QdrantVectorStore:
         points = []
         for chunk in chunks:
             point_id = str(uuid5(NAMESPACE_URL, f"{chunk.acl.tenant_id}:{chunk.doc_id}:{chunk.acl.chunk_id}"))
-            points.append(models.PointStruct(id=point_id, vector=self.embedder.embed(chunk.text), payload={
+            text_to_embed = chunk.embed_text if chunk.embed_text is not None else chunk.text
+            points.append(models.PointStruct(id=point_id, vector=self.embedder.embed(text_to_embed), payload={
                 "tenant_id": chunk.acl.tenant_id,
                 "chunk_id": chunk.acl.chunk_id,
                 "doc_id": chunk.doc_id,
