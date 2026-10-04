@@ -8,13 +8,16 @@ import os
 import secrets
 from uuid import uuid4
 
+from hashlib import sha256
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.core.permissions import ChunkACL
+from app.core.permissions import ChunkACL, can_access
+from app.core.principal import Principal
 from app.core.security import create_access_token
 from app.db.models import Chunk, Document, Role, Tenant, User
 from app.main import app
@@ -202,13 +205,176 @@ def test_counterfactual_restricted_document_invariance() -> None:
             session.execute(text("DELETE FROM roles WHERE tenant_id=:t"), {"t": tenant_id})
             session.commit()
         from qdrant_client.http import models as rest_models
-        vector_store.client.delete(
-            collection_name=settings.qdrant_collection,
-            points_selector=rest_models.FilterSelector(
-                filter=rest_models.Filter(
-                    must=[rest_models.FieldCondition(key="tenant_id", match=rest_models.MatchValue(value=tenant_id))]
+        for t in [tenant_id]:
+            vector_store.client.delete(
+                collection_name=settings.qdrant_collection,
+                points_selector=rest_models.FilterSelector(
+                    filter=rest_models.Filter(
+                        must=[rest_models.FieldCondition(key="tenant_id", match=rest_models.MatchValue(value=t))]
+                    )
+                ),
+                wait=True,
+            )
+
+
+@pytest.mark.skipif(
+    os.getenv("RUN_REAL_STACK") != "1" or os.getenv("PERSISTENCE_BACKEND") != "postgres" or os.getenv("VECTOR_BACKEND") != "qdrant",
+    reason="requires live PostgreSQL and Qdrant backends",
+)
+def test_counterfactual_every_principal_invariance() -> None:
+    """Verifies counterfactual invariance across multiple principals and cross-tenant boundaries.
+
+    For each principal, removing ONLY the documents they cannot access produces mathematically
+    identical answers, citation IDs, citation ordering, and scores within tolerance.
+    """
+    from qdrant_client.http import models as rest_models
+
+    settings = get_settings()
+    engine = create_engine(settings.database_url.replace("postgresql://", "postgresql+psycopg://", 1))
+    vector_store = QdrantVectorStore(settings)
+    client = TestClient(app)
+
+    t_a = f"tenant-cfa-{uuid4().hex[:8]}"
+    t_b = f"tenant-cfb-{uuid4().hex[:8]}"
+
+    users_spec = [
+        ("emp_a", t_a, ["employee"], "internal"),
+        ("hr_a", t_a, ["hr"], "restricted"),
+        ("admin_a", t_a, ["admin"], "restricted"),
+        ("emp_b", t_b, ["employee"], "internal"),
+        ("admin_b", t_b, ["admin"], "restricted"),
+    ]
+
+    docs_spec = [
+        ("doc_a_public", t_a, "Public Safety Regulations", ["employee", "hr", "admin"], "public", "General workplace safety regulations and emergency evacuation routes."),
+        ("doc_a_eng", t_a, "Engineering Architecture", ["engineering", "admin"], "internal", "Engineering microservice architecture and deployment pipelines."),
+        ("doc_a_salary", t_a, "Executive Salary Bands", ["hr", "admin"], "restricted", "Executive salary band benchmarks and equity compensation structures."),
+        ("doc_b_handbook", t_b, "Client Onboarding Handbook", ["employee", "admin"], "internal", "Tenant B proprietary client onboarding procedures and compliance handbook."),
+    ]
+
+    tokens: dict[str, str] = {}
+    with Session(engine) as session:
+        session.merge(Tenant(id=t_a, name=f"CF Tenant A {t_a}"))
+        session.merge(Tenant(id=t_b, name=f"CF Tenant B {t_b}"))
+        session.flush()
+        for t in [t_a, t_b]:
+            for r in ["admin", "hr", "engineering", "employee"]:
+                session.add(Role(tenant_id=t, name=r, implies=[]))
+        session.flush()
+
+        for u_id, t_id, roles, clearance in users_spec:
+            session.merge(User(id=u_id, tenant_id=t_id, password_hash="!", clearance=clearance, active=True, roles=roles))
+            tokens[u_id] = create_access_token({"sub": u_id, "tenant_id": t_id, "roles": roles}, settings.jwt_secret, 3600)
+        session.commit()
+
+    def _seed_all_docs() -> None:
+        points = []
+        with Session(engine) as session:
+            for d_slug, t_id, title, roles, sens, text_val in docs_spec:
+                d_id = f"{t_id}:{d_slug}"
+                session.merge(Document(id=d_id, tenant_id=t_id, title=title, status="ready", source="test", created_by="admin"))
+                session.flush()
+                c_id = f"{d_id}:0"
+                session.merge(Chunk(
+                    id=c_id,
+                    tenant_id=t_id,
+                    document_id=d_id,
+                    text=text_val,
+                    content_hash=sha256(text_val.encode()).hexdigest(),
+                    allowed_roles=sorted(roles),
+                    allowed_users=[],
+                    sensitivity=sens,
+                ))
+                points.append(VectorChunk(ChunkACL(t_id, c_id, frozenset(roles), sensitivity=sens), text_val, doc_id=d_id))
+            session.commit()
+        vector_store.upsert(points)
+
+    _seed_all_docs()
+
+    queries = [
+        {"question": "workplace safety evacuation routes"},
+        {"question": "engineering architecture deployment pipelines"},
+        {"question": "salary band benchmarks compensation"},
+        {"question": "client onboarding procedures compliance"},
+    ]
+
+    try:
+        for u_id, t_id, roles, clearance in users_spec:
+            principal = Principal(u_id, t_id, frozenset(roles), clearance)
+
+            # Baseline: Run all queries in World 1 (all documents present)
+            w1_responses = {}
+            for q in queries:
+                resp = client.post("/v1/query", headers={"Authorization": f"Bearer {tokens[u_id]}"}, json=q)
+                assert resp.status_code == 200
+                w1_responses[q["question"]] = resp.json()
+
+            # Identify documents this principal CANNOT access
+            unauthorized_doc_ids = []
+            for d_slug, doc_tenant, _, doc_roles, sens, _ in docs_spec:
+                full_doc_id = f"{doc_tenant}:{d_slug}"
+                acl = ChunkACL(doc_tenant, f"{full_doc_id}:0", frozenset(doc_roles), sensitivity=sens)
+                if not can_access(principal, acl):
+                    unauthorized_doc_ids.append(full_doc_id)
+
+            # World 2 (True Removal of unauthorized documents for this principal)
+            with Session(engine) as session:
+                for doc_id in unauthorized_doc_ids:
+                    session.execute(text("DELETE FROM chunks WHERE document_id=:did"), {"did": doc_id})
+                    session.execute(text("DELETE FROM documents WHERE id=:did"), {"did": doc_id})
+                session.commit()
+
+            for doc_id in unauthorized_doc_ids:
+                vector_store.client.delete(
+                    collection_name=settings.qdrant_collection,
+                    points_selector=rest_models.FilterSelector(
+                        filter=rest_models.Filter(
+                            must=[rest_models.FieldCondition(key="doc_id", match=rest_models.MatchValue(value=doc_id))]
+                        )
+                    ),
+                    wait=True,
                 )
-            ),
-            wait=True,
-        )
+
+            # Run queries in World 2 and assert mathematical invariance
+            for q in queries:
+                resp_w2 = client.post("/v1/query", headers={"Authorization": f"Bearer {tokens[u_id]}"}, json=q)
+                assert resp_w2.status_code == 200
+                w2_data = resp_w2.json()
+                w1_data = w1_responses[q["question"]]
+
+                # Identical answer
+                assert w2_data["answer"] == w1_data["answer"]
+                # Identical citation IDs and order
+                w1_ids = [c["chunk_id"] for c in w1_data["citations"]]
+                w2_ids = [c["chunk_id"] for c in w2_data["citations"]]
+                assert w2_ids == w1_ids, f"Mismatch for user {u_id} on query {q['question']}: {w2_ids} != {w1_ids}"
+                # Scores within 1e-4 tolerance
+                for c1, c2 in zip(w1_data["citations"], w2_data["citations"]):
+                    assert abs(float(c1["score"]) - float(c2["score"])) < 1e-4
+                # Response shape
+                assert set(w2_data.keys()) == set(w1_data.keys()) == {"answer", "citations", "audit_id"}
+
+            # Restore full corpus for the next principal
+            _seed_all_docs()
+
+    finally:
+        # Full cleanup of test tenants
+        with Session(engine) as session:
+            for t in [t_a, t_b]:
+                session.execute(text("DELETE FROM chunks WHERE tenant_id=:t"), {"t": t})
+                session.execute(text("DELETE FROM documents WHERE tenant_id=:t"), {"t": t})
+                session.execute(text("DELETE FROM users WHERE tenant_id=:t"), {"t": t})
+                session.execute(text("DELETE FROM roles WHERE tenant_id=:t"), {"t": t})
+            session.commit()
+        for t in [t_a, t_b]:
+            vector_store.client.delete(
+                collection_name=settings.qdrant_collection,
+                points_selector=rest_models.FilterSelector(
+                    filter=rest_models.Filter(
+                        must=[rest_models.FieldCondition(key="tenant_id", match=rest_models.MatchValue(value=t))]
+                    )
+                ),
+                wait=True,
+            )
+
 

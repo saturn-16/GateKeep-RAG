@@ -19,7 +19,8 @@ from sqlalchemy.orm import Session
 
 from app.api.state import state
 from app.config import get_settings
-from app.core.permissions import ChunkACL
+from app.core.permissions import ChunkACL, can_access
+from app.core.principal import Principal
 from app.core.security import create_access_token
 from app.db.models import Chunk, Document, Role, Tenant, User
 from app.main import app
@@ -530,27 +531,59 @@ HANDWRITTEN_QUERIES = [
 ]
 
 CANARIES: dict[str, dict[str, object]] = {}
-
+CORPUS_DOCS: dict[str, dict] = {}
+CORPUS_CHUNKS: dict[str, list[dict]] = {}
+CORPUS_POINTS: dict[str, list[VectorChunk]] = {}
+CORPUS_ACLS: dict[str, ChunkACL] = {}
 
 
 # ---------------------------------------------------------------------------
 # Seeding the 210-Chunk Eval Corpus into DB & Qdrant
 # ---------------------------------------------------------------------------
 def seed_large_eval_corpus(settings) -> None:
+    from qdrant_client.http import models as rest_models
+
     engine = create_engine(settings.database_url.replace("postgresql://", "postgresql+psycopg://", 1))
     vector_store = QdrantVectorStore(settings)
     points: list[VectorChunk] = []
 
+    CORPUS_DOCS.clear()
+    CORPUS_CHUNKS.clear()
+    CORPUS_POINTS.clear()
+    CORPUS_ACLS.clear()
+    CANARIES.clear()
+
+    tenants = {"acme-corp", "globex-inc", "initech-llc"}
+
+    # Clean prior eval chunks to guarantee exact corpus count
+    with Session(engine) as session:
+        session.execute(text("DELETE FROM chunks WHERE tenant_id IN ('acme-corp', 'globex-inc', 'initech-llc')"))
+        session.execute(text("DELETE FROM documents WHERE tenant_id IN ('acme-corp', 'globex-inc', 'initech-llc')"))
+        session.commit()
+
+    for t_id in tenants:
+        try:
+            vector_store.client.delete(
+                collection_name=settings.qdrant_collection,
+                points_selector=rest_models.FilterSelector(
+                    filter=rest_models.Filter(
+                        must=[rest_models.FieldCondition(key="tenant_id", match=rest_models.MatchValue(value=t_id))]
+                    )
+                ),
+                wait=True,
+            )
+        except Exception:
+            pass
+
     with Session(engine) as session:
         # 1. Tenants
-        tenants = {u[1] for u in EVAL_USERS}
         for t_id in tenants:
             session.merge(Tenant(id=t_id, name=t_id))
         session.flush()
 
         # 2. Roles
         for t_id in tenants:
-            for r in ["admin", "hr", "finance", "engineering", "legal", "employee", "viewer"]:
+            for r in ["admin", "hr", "finance", "engineering", "legal", "employee", "viewer", "sales"]:
                 if not session.scalar(select(Role).where(Role.tenant_id == t_id, Role.name == r)):
                     session.add(Role(tenant_id=t_id, name=r, implies=[]))
         session.commit()
@@ -572,14 +605,20 @@ def seed_large_eval_corpus(settings) -> None:
             for doc_slug, title, allowed_roles, sensitivity, chunks, is_restricted, _ in EVAL_DOC_TEMPLATES:
                 doc_id = f"{t_id}:{doc_slug}"
 
-                session.merge(Document(
-                    id=doc_id,
-                    tenant_id=t_id,
-                    title=f"{t_id.title()} {title}",
-                    status="ready",
-                    source="eval_seed",
-                    created_by=f"admin-{t_id}",
-                ))
+                doc_dict = {
+                    "id": doc_id,
+                    "tenant_id": t_id,
+                    "title": f"{t_id.title()} {title}",
+                    "status": "ready",
+                    "source": "eval_seed",
+                    "created_by": f"admin-{t_id}",
+                }
+                CORPUS_DOCS[doc_id] = doc_dict
+                CORPUS_CHUNKS[doc_id] = []
+                CORPUS_POINTS[doc_id] = []
+                CORPUS_ACLS[doc_id] = ChunkACL(t_id, f"{doc_id}:chunk-0", frozenset(allowed_roles), sensitivity=sensitivity)
+
+                session.merge(Document(**doc_dict))
 
                 for chunk_idx, (chunk_suffix, text_content) in enumerate(chunks):
                     chunk_id = f"{doc_id}:chunk-{chunk_idx}-{chunk_suffix}"
@@ -601,24 +640,30 @@ def seed_large_eval_corpus(settings) -> None:
 
                     content_hash = sha256(chunk_text.encode()).hexdigest()
 
-                    session.merge(Chunk(
-                        id=chunk_id,
-                        tenant_id=t_id,
-                        document_id=doc_id,
-                        text=chunk_text,
-                        content_hash=content_hash,
-                        allowed_roles=sorted(allowed_roles),
-                        allowed_users=[],
-                        sensitivity=sensitivity,
-                        page=chunk_idx + 1,
-                    ))
-                    points.append(VectorChunk(
+                    chunk_dict = {
+                        "id": chunk_id,
+                        "tenant_id": t_id,
+                        "document_id": doc_id,
+                        "text": chunk_text,
+                        "content_hash": content_hash,
+                        "allowed_roles": sorted(allowed_roles),
+                        "allowed_users": [],
+                        "sensitivity": sensitivity,
+                        "page": chunk_idx + 1,
+                    }
+                    CORPUS_CHUNKS[doc_id].append(chunk_dict)
+
+                    session.merge(Chunk(**chunk_dict))
+
+                    vchunk = VectorChunk(
                         ChunkACL(t_id, chunk_id, frozenset(allowed_roles), sensitivity=sensitivity),
                         chunk_text,
                         0.0,
                         doc_id,
                         "ready",
-                    ))
+                    )
+                    CORPUS_POINTS[doc_id].append(vchunk)
+                    points.append(vchunk)
         session.commit()
 
     vector_store.upsert(points)
@@ -815,64 +860,92 @@ def run_evaluation_sweep(client, tokens, user_meta, eval_matrix, doc_meta, chunk
 
 
 # ---------------------------------------------------------------------------
-# Counterfactual Test (Requirement 1)
+# User x Document Allow/Deny Matrix (Requirement 1)
+# ---------------------------------------------------------------------------
+def print_user_document_allow_deny_matrix() -> None:
+    """Computes and prints the User x Document Allow/Deny Matrix across all 3 tenants."""
+    tenants = ["acme-corp", "globex-inc", "initech-llc"]
+    users = [Principal(u, t, frozenset(r), c) for u, t, r, c in EVAL_USERS]
+
+    matrix: dict[str, dict[str, bool]] = {}
+    for u in users:
+        matrix[u.user_id] = {}
+        for t in tenants:
+            for doc_slug, title, allowed_roles, sensitivity, _, _, _ in EVAL_DOC_TEMPLATES:
+                doc_id = f"{t}:{doc_slug}"
+                acl = ChunkACL(tenant_id=t, chunk_id=f"{doc_id}:chunk-0", allowed_roles=frozenset(allowed_roles), sensitivity=sensitivity)
+                matrix[u.user_id][doc_id] = can_access(u, acl)
+
+    print("\n" + "=" * 95)
+    print("                     USER x DOCUMENT ALLOW / DENY MATRIX SUMMARY                     ")
+    print("=" * 95)
+    print(f"{'User':<9} | {'Tenant':<12} | {'Roles':<15} | {'Clearance':<12} | {'Allowed (Same)':<14} | {'Denied (Cross)':<14} | {'Denied (Same)':<13}")
+    print("-" * 95)
+    for u in users:
+        same_allowed = sum(1 for d, v in matrix[u.user_id].items() if v and d.startswith(u.tenant_id))
+        cross_denied = sum(1 for d, v in matrix[u.user_id].items() if not v and not d.startswith(u.tenant_id))
+        same_denied = sum(1 for d, v in matrix[u.user_id].items() if not v and d.startswith(u.tenant_id))
+        roles_str = str(sorted(u.roles))
+        print(f"{u.user_id:<9} | {u.tenant_id:<12} | {roles_str:<15} | {u.clearance:<12} | {same_allowed:<14} | {cross_denied:<14} | {same_denied:<13}")
+    print("=" * 95)
+
+
+# ---------------------------------------------------------------------------
+# Counterfactual Test across Every Principal (Requirement 1)
 # ---------------------------------------------------------------------------
 def run_counterfactual_test(client, tokens, user_meta, eval_matrix, settings, threshold: float, baseline_responses: dict[tuple[str, str], dict]) -> dict[str, object]:
-    """Runs all (user, query) pairs with TRUE removal of restricted documents from PostgreSQL and Qdrant.
+    """Runs counterfactual existence and invariance testing for EVERY principal.
 
-    Asserts that unauthorized users receive identical answer, citations (IDs and order),
-    and scores within tolerance (1e-4) whether restricted docs exist or not.
+    For each user, removes ONLY the documents that user cannot access, and asserts
+    identical answers, citation IDs, citation ordering, and scores within tolerance (1e-4).
     """
+    from qdrant_client.http import models as rest_models
     settings.retrieval_score_threshold = threshold
     engine = create_engine(settings.database_url.replace("postgresql://", "postgresql+psycopg://", 1))
     vector_store = QdrantVectorStore(settings)
 
-    # 1. Identify all restricted documents
-    restricted_docs = [
-        f"{t_id}:{doc_slug}"
-        for t_id in {"acme-corp", "globex-inc", "initech-llc"}
-        for doc_slug, _, _, _, _, is_restricted, _ in EVAL_DOC_TEMPLATES
-        if is_restricted
-    ]
-
-    # 2. TRUE REMOVAL: Actually DELETE restricted chunks and documents from DB and Qdrant
-    with Session(engine) as session:
-        session.execute(text("DELETE FROM chunks WHERE sensitivity='restricted'"))
-        for doc_id in restricted_docs:
-            session.execute(text("DELETE FROM documents WHERE id=:doc_id"), {"doc_id": doc_id})
-        session.commit()
-
-    from qdrant_client.http import models as rest_models
-    vector_store.client.delete(
-        collection_name=settings.qdrant_collection,
-        points_selector=rest_models.FilterSelector(
-            filter=rest_models.Filter(
-                must=[
-                    rest_models.FieldCondition(key="sensitivity", match=rest_models.MatchValue(value="restricted")),
-                ]
-            )
-        ),
-        wait=True,
-    )
-
-    # 3. Run counterfactual (restricted docs truly absent)
-    counterfactual_responses: dict[tuple[str, str], dict] = {}
+    all_doc_ids = list(CORPUS_DOCS.keys())
     mismatches = []
-    unauthorized_pairs_checked = 0
+    total_pairs_checked = 0
     pairs_with_non_empty_results = 0
     pairs_with_empty_results = 0
-
-    clearance_ranks = {"public": 0, "internal": 1, "confidential": 2, "restricted": 3}
+    user_results: dict[str, dict] = {}
 
     try:
-        for username, q_spec in eval_matrix:
-            user_tenant, user_roles, user_clearance = user_meta[username]
-            user_has_restricted = ("admin" in user_roles) or (clearance_ranks.get(user_clearance, -1) >= clearance_ranks.get("restricted", 99))
+        for u_id, t_id, roles, clearance in EVAL_USERS:
+            principal = Principal(u_id, t_id, frozenset(roles), clearance)
 
-            # Evaluate unauthorized pairs
-            if not user_has_restricted:
-                unauthorized_pairs_checked += 1
-                headers = {"Authorization": f"Bearer {tokens[username]}"}
+            # 1. Identify all documents this principal CANNOT access
+            denied_doc_ids = [
+                d_id for d_id in all_doc_ids
+                if not can_access(principal, CORPUS_ACLS[d_id])
+            ]
+
+            # 2. TRUE REMOVAL: Actually DELETE denied chunks and documents from DB and Qdrant
+            with Session(engine) as session:
+                for did in denied_doc_ids:
+                    session.execute(text("DELETE FROM chunks WHERE document_id=:did"), {"did": did})
+                    session.execute(text("DELETE FROM documents WHERE id=:did"), {"did": did})
+                session.commit()
+
+            for did in denied_doc_ids:
+                vector_store.client.delete(
+                    collection_name=settings.qdrant_collection,
+                    points_selector=rest_models.FilterSelector(
+                        filter=rest_models.Filter(
+                            must=[rest_models.FieldCondition(key="doc_id", match=rest_models.MatchValue(value=did))]
+                        )
+                    ),
+                    wait=True,
+                )
+
+            # 3. Run all queries for this principal in World 2 (denied docs truly removed)
+            user_queries = [q for user, q in eval_matrix if user == u_id]
+            headers = {"Authorization": f"Bearer {tokens[u_id]}"}
+            user_mismatches = 0
+
+            for q_spec in user_queries:
+                total_pairs_checked += 1
                 resp = client.post("/v1/query", headers=headers, json={"question": q_spec["question"], "top_k": 5})
                 assert resp.status_code == 200
                 data = resp.json()
@@ -881,7 +954,7 @@ def run_counterfactual_test(client, tokens, user_meta, eval_matrix, settings, th
                     "answer": data.get("answer", ""),
                     "citations": data.get("citations", []),
                 }
-                base = baseline_responses[(username, q_spec["question"])]
+                base = baseline_responses[(u_id, q_spec["question"])]
 
                 base_cits = base.get("citations", [])
                 counter_cits = res_counter.get("citations", [])
@@ -910,25 +983,47 @@ def run_counterfactual_test(client, tokens, user_meta, eval_matrix, settings, th
                 answer_match = (base.get("answer") == res_counter.get("answer"))
 
                 if not (id_match and scores_match and answer_match):
+                    user_mismatches += 1
                     mismatches.append({
-                        "user": username,
+                        "user": u_id,
                         "query": q_spec["question"],
                         "baseline": base,
                         "counterfactual": res_counter,
                         "reason": f"id_match={id_match}, scores_match={scores_match}, answer_match={answer_match}",
                     })
 
+            user_results[u_id] = {
+                "queries_evaluated": len(user_queries),
+                "denied_docs_removed": len(denied_doc_ids),
+                "mismatches": user_mismatches,
+            }
+
+            # 4. Restore the removed documents into DB and Qdrant before next user
+            with Session(engine) as session:
+                for did in denied_doc_ids:
+                    session.merge(Document(**CORPUS_DOCS[did]))
+                    for chunk_dict in CORPUS_CHUNKS[did]:
+                        session.merge(Chunk(**chunk_dict))
+                session.commit()
+
+            points_to_restore = []
+            for did in denied_doc_ids:
+                points_to_restore.extend(CORPUS_POINTS[did])
+            if points_to_restore:
+                vector_store.upsert(points_to_restore)
+
     finally:
-        # 4. Restore DB and vector store to full corpus
+        # Final safety restore of full corpus
         seed_large_eval_corpus(settings)
 
     return {
-        "total_pairs_checked": len(eval_matrix),
-        "unauthorized_pairs_checked": unauthorized_pairs_checked,
+        "total_pairs_checked": total_pairs_checked,
+        "users_evaluated": len(EVAL_USERS),
         "pairs_with_non_empty_results": pairs_with_non_empty_results,
         "pairs_with_empty_results": pairs_with_empty_results,
         "mismatches_count": len(mismatches),
         "mismatches": mismatches,
+        "user_results": user_results,
     }
 
 
@@ -945,6 +1040,9 @@ def main() -> None:
 
     print("Seeding expanded 210-chunk multi-tenant corpus into PostgreSQL & Qdrant...")
     seed_large_eval_corpus(settings)
+
+    # Requirement 1: Print User x Document Allow/Deny Matrix
+    print_user_document_allow_deny_matrix()
 
     client = TestClient(app)
 
@@ -1114,16 +1212,21 @@ def main() -> None:
         # Requirement 1: Counterfactual Test (evaluated at calibrated threshold 0.35)
         print("\nRunning Counterfactual Existence Test (World 1 vs World 2)...")
         cf_res = run_counterfactual_test(client, tokens, user_meta, eval_matrix, settings, threshold=0.35, baseline_responses=results[0.35]["responses"])
-        print("\n" + "=" * 75)
-        print("                   COUNTERFACTUAL TEST RESULTS                        ")
-        print("=" * 75)
+        print("\n" + "=" * 80)
+        print("         COUNTERFACTUAL INVARIANCE TEST RESULTS (EVERY PRINCIPAL)         ")
+        print("=" * 80)
+        print(f"  Principals Evaluated             : {cf_res['users_evaluated']} (all users across 3 tenants)")
         print(f"  Total Pairs Evaluated            : {cf_res['total_pairs_checked']}")
-        print(f"  Unauthorized Pairs Evaluated     : {cf_res['unauthorized_pairs_checked']}")
         print(f"  Pairs with Non-Empty Results     : {cf_res['pairs_with_non_empty_results']} (Permitted chunks retrieved)")
         print(f"  Pairs with Empty Results         : {cf_res['pairs_with_empty_results']} (Standard refusal / no match)")
         print(f"  Counterfactual Mismatches        : {cf_res['mismatches_count']}")
-        print(f"  Counterfactual Invariance Rate   : {((cf_res['unauthorized_pairs_checked'] - cf_res['mismatches_count']) / cf_res['unauthorized_pairs_checked'] * 100.0):.2f}%")
-        print("=" * 75)
+        invariance_rate = ((cf_res['total_pairs_checked'] - cf_res['mismatches_count']) / cf_res['total_pairs_checked'] * 100.0) if cf_res['total_pairs_checked'] else 100.0
+        print(f"  Counterfactual Invariance Rate   : {invariance_rate:.2f}%")
+        print("-" * 80)
+        print("  Per-Principal Breakdown:")
+        for u_id, u_data in cf_res["user_results"].items():
+            print(f"    - {u_id:<8}: {u_data['queries_evaluated']} queries checked | {u_data['denied_docs_removed']} unauthorized docs removed | {u_data['mismatches']} mismatches")
+        print("=" * 80)
         if cf_res["mismatches"]:
             print(f"\n--- Counterfactual Mismatch Details ({len(cf_res['mismatches'])} total) ---")
             for m in cf_res["mismatches"][:10]:
