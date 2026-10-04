@@ -58,15 +58,23 @@ class QdrantVectorStore:
             if should and "admin" not in principal.roles else None,
         )
         score_threshold = self.settings.retrieval_score_threshold if self.settings.embedding_provider != "hash" else None
+        candidate_limit = min(max(top_k * 2, 10), 20) if getattr(self.settings, "enable_hybrid_search", False) else min(top_k, 20)
         response = self.client.query_points(
             collection_name=self.settings.qdrant_collection,
             query=self.embedder.embed(query),
             query_filter=query_filter,
-            limit=min(top_k, 20),
-            score_threshold=score_threshold,
+            limit=candidate_limit,
+            score_threshold=score_threshold if not getattr(self.settings, "enable_hybrid_search", False) else None,
             with_payload=True,
         ).points
         chunks = [self._chunk(point) for point in response if isinstance(point.payload, dict)]
+        if getattr(self.settings, "enable_hybrid_search", False) and chunks:
+            from app.rag.vectorstore.hybrid import fuse_dense_and_bm25
+
+            chunks = fuse_dense_and_bm25(chunks, query)
+            if score_threshold is not None:
+                chunks = [c for c in chunks if c.score >= score_threshold]
+            chunks = chunks[: min(top_k, 20)]
         if self.settings.embedding_provider == "hash":
             query_terms = {term.lower().strip(".,;:!?\"'") for term in query.split() if term}
             if query_terms:
