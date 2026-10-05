@@ -10,30 +10,30 @@ Every document chunk carries tenant ownership and role/clearance access control 
 
 ```mermaid
 flowchart TD
-    Client["Client / Frontend"] -->|1. JWT Bearer Token + Query| API["FastAPI Gateway"]
-    API -->|2. Verify Signature & Resolve Identity| Auth["Auth Dependency\n(scrypt / HMAC-SHA256)"]
-    Auth -->|3. Principal Context\n(tenant_id, roles, clearance)| Retriever["TenantScopedRetriever"]
+    Client["Client / Frontend"] -->|"1. JWT Bearer Token + Query"| API["FastAPI Gateway"]
+    API -->|"2. Verify Signature & Resolve Identity"| Auth["Auth Dependency<br/>(scrypt / HMAC-SHA256)"]
+    Auth -->|"3. Principal Context<br/>(tenant_id, roles, clearance)"| Retriever["TenantScopedRetriever"]
     
     subgraph VectorSearch ["Stage 1: Pre-Filtered Vector Search"]
-        Retriever -->|4. build_filter(principal)\nAdditive status=ready| Qdrant["Qdrant Vector DB\n(Cosine Similarity, 384d)"]
-        Qdrant -->|5. Candidate Chunks| Retriever
+        Retriever -->|"4. build_filter(principal)<br/>Additive status=ready"| Qdrant["Qdrant Vector DB<br/>(Cosine Similarity, 384d)"]
+        Qdrant -->|"5. Candidate Chunks"| Retriever
     end
 
     subgraph DefenseInDepth ["Stage 2: Defense-in-Depth Verification"]
-        Retriever -->|6. can_access(principal, acl)\nDocument status == ready| Postgres["PostgreSQL 16\n(chunks, documents, roles)"]
-        Postgres -.->|Mismatch Alert| SecurityAlert["Audit: security_alert"]
-        Postgres -->|7. Verified Chunks Only| PromptBuilder["Grounded Prompt Builder"]
+        Retriever -->|"6. can_access(principal, acl)<br/>Document status == ready"| Postgres["PostgreSQL 16<br/>(chunks, documents, roles)"]
+        Postgres -.->|"Mismatch Alert"| SecurityAlert["Audit: security_alert"]
+        Postgres -->|"7. Verified Chunks Only"| PromptBuilder["Grounded Prompt Builder"]
     end
 
     subgraph Generation ["Stage 3: Grounded Synthesis & Guardrails"]
-        PromptBuilder -->|8. Grounded Context| LLM["LLM Provider\n(MockLLM / Ollama llama3.2:3b)"]
-        LLM -->|9. Raw Output| OutputGuard["OutputGuard\n(Citation Scrubber)"]
-        OutputGuard -->|10. Guarded Answer| AuditService["Audit Service\n(pg_advisory_xact_lock)"]
+        PromptBuilder -->|"8. Grounded Context"| LLM["LLM Provider<br/>(MockLLM / Ollama llama3.2:3b)"]
+        LLM -->|"9. Raw Output"| OutputGuard["OutputGuard<br/>(Citation Scrubber)"]
+        OutputGuard -->|"10. Guarded Answer"| AuditService["Audit Service<br/>(pg_advisory_xact_lock)"]
     end
 
     subgraph AuditLog ["Stage 4: Tamper-Evident Hash Chain"]
-        AuditService -->|11. SHA-256 Hash-Chained Row| AuditTable["PostgreSQL audit_logs\n(Non-owner gatekeep_app role)"]
-        AuditTable -->|12. Final Response with Citations & audit_id| Client
+        AuditService -->|"11. SHA-256 Hash-Chained Row"| AuditTable["PostgreSQL audit_logs<br/>(Non-owner gatekeep_app role)"]
+        AuditTable -->|"12. Final Response with Citations & audit_id"| Client
     end
 ```
 
