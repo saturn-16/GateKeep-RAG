@@ -6,8 +6,16 @@ from sqlalchemy import engine_from_config, pool
 from app.config import get_settings
 from app.db.models import Base
 
+def _alembic_db_url(url: str) -> str:
+    if url.startswith("postgres://"):
+        return url.replace("postgres://", "postgresql+psycopg://", 1)
+    if url.startswith("postgresql://"):
+        return url.replace("postgresql://", "postgresql+psycopg://", 1)
+    return url
+
+
 config = context.config
-config.set_main_option("sqlalchemy.url", get_settings().database_url.replace("postgresql://", "postgresql+psycopg://", 1))
+config.set_main_option("sqlalchemy.url", _alembic_db_url(get_settings().database_url))
 if config.config_file_name and config.get_section("loggers"):
     fileConfig(config.config_file_name)
 target_metadata = Base.metadata

@@ -36,7 +36,7 @@ def main() -> None:
 		session.flush()
 		for tenant_id in {item[1] for item in USERS}:
 			for role in {"admin", "hr", "finance", "engineering", "legal", "employee", "viewer"}:
-				session.add(Role(tenant_id=tenant_id, name=role, implies=[]))
+				session.merge(Role(tenant_id=tenant_id, name=role, implies=[]))
 		session.commit()
 		for user_id, tenant_id, roles, clearance in USERS:
 			session.merge(User(id=user_id, tenant_id=tenant_id, password_hash=hash_password(user_id), clearance=clearance, active=True, roles=roles))

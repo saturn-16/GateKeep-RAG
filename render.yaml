@@ -1,0 +1,53 @@
+services:
+  # 1. GateKeep Unified Web Application (FastAPI + React Frontend)
+  - type: web
+    name: gatekeep-rag
+    runtime: docker
+    region: oregon
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /healthz
+    envVars:
+      - key: PERSISTENCE_BACKEND
+        value: postgres
+      - key: VECTOR_BACKEND
+        value: qdrant
+      - key: RUN_REAL_STACK
+        value: "1"
+      - key: QDRANT_URL
+        fromService:
+          type: pserv
+          name: gatekeep-qdrant
+          envVarKey: QDRANT_INTERNAL_URL
+      - key: DATABASE_URL
+        fromDatabase:
+          name: gatekeep-postgres
+          property: connectionString
+      - key: MIGRATION_DATABASE_URL
+        fromDatabase:
+          name: gatekeep-postgres
+          property: connectionString
+      - key: JWT_SECRET
+        generateValue: true
+
+  # 2. Qdrant Vector Database (Private Service with Persistent Disk)
+  - type: pserv
+    name: gatekeep-qdrant
+    runtime: image
+    image:
+      url: qdrant/qdrant:v1.19.1
+    region: oregon
+    disk:
+      name: qdrant-storage
+      mountPath: /qdrant/storage
+      sizeGB: 10
+    envVars:
+      - key: QDRANT_INTERNAL_URL
+        value: http://gatekeep-qdrant:6333
+
+databases:
+  # 3. PostgreSQL Managed Database
+  - name: gatekeep-postgres
+    databaseName: gatekeep
+    user: gatekeep
+    region: oregon
+    postgresMajorVersion: 16
