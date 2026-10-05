@@ -142,11 +142,11 @@ All security invariants and empirical metrics are proven against live PostgreSQL
 |:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|---|
 | **0.15** | 100.00% | 0.9979 | 100.00% | 1.0000 | 1.28% (7 / 547) | 0.00% | 0 / 823,996 checks | Overly permissive; permitted chunks match loose topical overlap |
 | **0.20** | 100.00% | 0.9979 | 100.00% | 1.0000 | 7.31% (40 / 547) | 0.00% | 0 / 823,996 checks | Permissive; broad semantic recall with frequent cross-domain permitted matches |
-| **0.25** | 100.00% | 0.9979 | 100.00% | 1.0000 | 25.59% (140 / 547) | 0.00% | 0 / 823,996 checks | Moderate semantic matching; captures conversational queries |
+| **0.25** | 100.00% | 0.9979 | 100.00% | 1.0000 | 25.23% (138 / 547) | 0.00% | 0 / 823,996 checks | Moderate semantic matching; captures conversational queries |
 | **0.30** | 100.00% | 0.9979 | 100.00% | 1.0000 | 47.71% (261 / 547) | 0.00% | 0 / 823,996 checks | Balanced filter; eliminates weakly related company documents |
 | **0.35** | **100.00%** | **0.9979** | **100.00%** | **1.0000** | **69.65% (381 / 547)** | **0.00%** | **0 / 823,996 checks** | **Selected calibration threshold; 100% Dev & Held-Out Recall with 69.65% parity** |
 | **0.40** | 98.56% | 0.9856 | 100.00% | 1.0000 | 88.67% (485 / 547) | 0.00% | 0 / 823,996 checks | Conservative cutoff; minor drop in synthetic recall (4 misses) |
-| **0.45** | 97.13% | 0.9713 | 95.00% | 0.9500 | 95.98% (525 / 547) | 0.00% | 0 / 823,996 checks | Strict cutoff; 16 misses on concise technical terms |
+| **0.45** | 97.13% | 0.9713 | 96.36% | 0.9636 | 95.98% (525 / 547) | 0.00% | 0 / 823,996 checks | Strict cutoff; 16 misses on concise technical terms |
 
 ---
 
@@ -156,7 +156,7 @@ All security invariants and empirical metrics are proven against live PostgreSQL
 > **Demo-Only Credentials & Secrets Replacement**: All personas below (`alice`/`alice`, `bob`/`bob`, etc.) and default service credentials (such as `gatekeep:gatekeep` and default JWT secrets) are seeded strictly for local sandbox demonstration, test suites, and offline evaluation. In any staging or production deployment, default credentials and static database passwords must be replaced by strong, dynamically provisioned secrets managed via a dedicated secrets store (such as AWS Secrets Manager or HashiCorp Vault).
 
 > [!IMPORTANT]
-> **Password Hash Migration & Reset Notice**: The password hashing format has been upgraded to explicitly encode scrypt parameters (`scrypt$<N>$<r>$<p>$<salt>$<digest>`) with strict parameter caps ($N \le 2^{18}$, $r \le 16$, $p \le 4$) and blind parameter fallbacks have been eliminated. Any pre-existing user accounts created under earlier unparameterized hash formats cannot be verified and require an administrative password reset.
+> **Password Hash Migration & Reset Notice**: The password hashing format has been upgraded to explicitly encode scrypt parameters as `scrypt$<n>$<r>$<p>$<salt_b64>$<digest_b64>` (e.g. `scrypt$131072$8$1$...`) with strict parameter caps ($N \le 2^{18}$, $r \le 16$, $p \le 4$), and blind parameter fallbacks have been eliminated. Any pre-existing user accounts created under earlier unparameterized hash formats cannot be verified and require an administrative password reset or re-seeding via `python scripts/seed_demo.py`.
 
 | Username | Password | Tenant | Roles | Clearance | Description |
 |---|---|---|---|---|---|

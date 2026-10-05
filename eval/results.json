@@ -1,0 +1,152 @@
+{
+  "corpus_hash": "2b245684f5a2b09a04761cc2b2f56e49b98d907eaa26b98be98abdc67cef5c40",
+  "corpus_size": {
+    "documents": 30,
+    "tenants": 3,
+    "total_chunks": 210,
+    "total_documents": 90
+  },
+  "embedding_model": "all-MiniLM-L6-v2",
+  "git_sha": "08c4589875e867a962fc0a6a88def9898a650526",
+  "metrics": {
+    "calibrated_threshold": {
+      "canary_inspection": {
+        "locations_per_check": 4,
+        "total_checks": 823996,
+        "total_location_inspections": 3295984,
+        "violations": 0
+      },
+      "combined_handwritten": {
+        "mrr": 0.9977,
+        "queries_evaluated": 440,
+        "recall_at_5": 100.0
+      },
+      "dev": {
+        "mrr": 1.0,
+        "queries_evaluated": 220,
+        "recall_at_5": 100.0
+      },
+      "held_out_test": {
+        "mrr": 0.9955,
+        "queries_evaluated": 220,
+        "recall_at_5": 100.0
+      },
+      "synthetic": {
+        "mrr": 0.9979,
+        "queries_evaluated": 487,
+        "recall_at_5": 100.0
+      },
+      "threshold": 0.35
+    },
+    "counterfactual_invariance": {
+      "invariance_rate": 100.0,
+      "mismatches_count": 0,
+      "pairs_with_empty_results": 1387,
+      "pairs_with_non_empty_results": 3585,
+      "principals_evaluated": 11,
+      "total_pairs_checked": 4972
+    },
+    "sweep": [
+      {
+        "canary_checks": 823996,
+        "canary_violations": 0,
+        "dev_mrr": 1.0,
+        "dev_recall_at_5": 100.0,
+        "leak_rate": 0.0,
+        "parity_count": 7,
+        "parity_share": 1.28,
+        "parity_total": 547,
+        "synth_mrr": 0.9979,
+        "synth_recall_at_5": 100.0,
+        "threshold": 0.15
+      },
+      {
+        "canary_checks": 823996,
+        "canary_violations": 0,
+        "dev_mrr": 1.0,
+        "dev_recall_at_5": 100.0,
+        "leak_rate": 0.0,
+        "parity_count": 40,
+        "parity_share": 7.31,
+        "parity_total": 547,
+        "synth_mrr": 0.9979,
+        "synth_recall_at_5": 100.0,
+        "threshold": 0.2
+      },
+      {
+        "canary_checks": 823996,
+        "canary_violations": 0,
+        "dev_mrr": 1.0,
+        "dev_recall_at_5": 100.0,
+        "leak_rate": 0.0,
+        "parity_count": 138,
+        "parity_share": 25.23,
+        "parity_total": 547,
+        "synth_mrr": 0.9979,
+        "synth_recall_at_5": 100.0,
+        "threshold": 0.25
+      },
+      {
+        "canary_checks": 823996,
+        "canary_violations": 0,
+        "dev_mrr": 1.0,
+        "dev_recall_at_5": 100.0,
+        "leak_rate": 0.0,
+        "parity_count": 261,
+        "parity_share": 47.71,
+        "parity_total": 547,
+        "synth_mrr": 0.9979,
+        "synth_recall_at_5": 100.0,
+        "threshold": 0.3
+      },
+      {
+        "canary_checks": 823996,
+        "canary_violations": 0,
+        "dev_mrr": 1.0,
+        "dev_recall_at_5": 100.0,
+        "leak_rate": 0.0,
+        "parity_count": 381,
+        "parity_share": 69.65,
+        "parity_total": 547,
+        "synth_mrr": 0.9979,
+        "synth_recall_at_5": 100.0,
+        "threshold": 0.35
+      },
+      {
+        "canary_checks": 823996,
+        "canary_violations": 0,
+        "dev_mrr": 1.0,
+        "dev_recall_at_5": 100.0,
+        "leak_rate": 0.0,
+        "parity_count": 485,
+        "parity_share": 88.67,
+        "parity_total": 547,
+        "synth_mrr": 0.9856,
+        "synth_recall_at_5": 98.56,
+        "threshold": 0.4
+      },
+      {
+        "canary_checks": 823996,
+        "canary_violations": 0,
+        "dev_mrr": 0.9636,
+        "dev_recall_at_5": 96.36,
+        "leak_rate": 0.0,
+        "parity_count": 525,
+        "parity_share": 95.98,
+        "parity_total": 547,
+        "synth_mrr": 0.9713,
+        "synth_recall_at_5": 97.13,
+        "threshold": 0.45
+      }
+    ],
+    "threshold_independence_zero": {
+      "canary_checks": 823996,
+      "canary_violations": 0,
+      "leak_rate": 0.0,
+      "recall_at_5": 100.0,
+      "threshold": 0.0
+    }
+  },
+  "seed": 42,
+  "threshold": 0.35
+}
