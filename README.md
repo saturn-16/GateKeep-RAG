@@ -61,92 +61,42 @@ flowchart TD
 
 ---
 
-## Security & Evaluation Results
+### Security Results & Invariants
 
-All security invariants and empirical metrics are proven against live PostgreSQL 16 and Qdrant 1.19.1 services on an expanded multi-tenant corporate corpus:
+All security properties are verified against live PostgreSQL 16 and Qdrant 1.19.1 backends on an isolated multi-tenant corporate corpus:
 
-### Core Security Guarantees: Counterfactual Invariance & Canary Defense
+1. **Every-Principal Counterfactual Invariance with True Removal (Corpus size: 210 chunks across 3 tenants)**
+   - **Evaluation Methodology**: For all **4,972 principal-query pairs** evaluated across 11 personas and 3 tenants (Corpus size: 210 chunks, 3 tenants), queries were executed in **World 1** (baseline corpus with restricted documents present) and **World 2** (TRUE REMOVAL: for each principal, every document they are not authorized to access was physically deleted from both PostgreSQL and Qdrant).
+   - **Permitted Document Retrieval**: In **3,585 pairs** (Corpus size: 210 chunks), authorized users retrieved permitted citations; citation IDs, ordering, scores (within $10^{-4}$ tolerance), and answers were identical between World 1 and World 2.
+   - **Restricted / Unmatched Retrieval**: In **1,387 pairs** (Corpus size: 210 chunks), unauthorized users received the standard refusal (`citations: []`, identical refusal answer).
+   - **Result**: **0 mismatches** across all 4,972 evaluations (100.0% counterfactual invariance rate; Corpus size: 210 chunks). The presence or physical deletion of restricted documents produces zero observational or behavioral divergence.
 
-1. **Counterfactual Invariance (100.00% Invariance Rate - 0 Mismatches)**
-   - **Evaluation Methodology**: For all **4,972 principal-query pairs** evaluated across 11 personas and 3 tenants, queries were executed in **World 1** (baseline corpus with restricted documents present) and **World 2** (TRUE REMOVAL: for each principal, every document they are not authorized to access was physically deleted from both PostgreSQL and Qdrant).
-   - **Permitted Document Retrieval**: In **3,585 pairs**, unauthorized users legitimately retrieved citations from permitted internal/public documents; citations (IDs and ordering), scores (within $10^{-4}$ tolerance), and answers were mathematically identical between World 1 and World 2.
-   - **Restricted / Unmatched Retrieval**: In **1,387 pairs**, unauthorized users received the standard no-access response (`citations: []`, identical refusal answer).
-   - **Result**: **0 mismatches** across all 4,972 evaluations. The existence or physical absence of restricted documents produces zero observational or behavioral divergence.
-
-2. **Ubiquitous Canary Token Defense (0 Leaks / 823,996 Checks)**
-   - **CSPRNG Generation**: A unique cryptographically secure canary token (`CANARY_<HEX16>_<TENANT>_<DOC>_C<IDX>`, 128 bits of CSPRNG entropy via Python `secrets.token_hex(16)`) was placed into **EVERY chunk of every document** across the entire corpus (all 210 chunks).
-   - **Four-Location Inspection**: For every unauthorized query evaluation, 4 distinct locations are inspected:
-     1. Raw prompt string and `DOCUMENT CONTEXT` sent to the LLM backend (intercepted via `PromptCapturingLLM`)
+2. **Canary Token Defense (Corpus size: 210 chunks across 3 tenants)**
+   - **CSPRNG Generation**: A unique canary token (`CANARY_<HEX16>_<TENANT>_<DOC>_C<IDX>`, 128 bits of CSPRNG entropy via Python `secrets.token_hex(16)`) was seeded into **all 210 chunks** of the corpus (Corpus size: 210 chunks).
+   - **Four-Location Inspection**: For every unauthorized query evaluation, 4 distinct locations were inspected:
+     1. Prompt string and context passed to the LLM backend (intercepted via `PromptCapturingLLM`)
      2. Generated LLM answer text
      3. Structured citations list
-     4. Complete serialized HTTP response JSON payload
-   - **Result**: $1,823 \text{ unauthorized user-chunk pairs} \times 452 \text{ unique queries} = \mathbf{823,996} \text{ canary checks}$ per sweep ($\mathbf{3,295,984}$ location inspections). **0 canary violations detected (0.00% leak rate)**.
+     4. Serialized HTTP response JSON payload
+   - **Result**: $1,823 \text{ unauthorized user-chunk pairs} \times 452 \text{ unique queries} = \mathbf{823,996} \text{ canary checks}$ ($\mathbf{3,295,984}$ location inspections; Corpus size: 210 chunks). **0 canary violations detected (0.00% leak rate)**.
 
-3. **Threshold-Independence (Guaranteed Security at Threshold 0.00)**
-   - When the similarity score threshold is set to `0.00` (allowing every query to retrieve the top-5 permitted chunks regardless of similarity score), cross-tenant leak rate remains **0.00%** and canary violations remain **0 / 823,996** (proven in `tests/security/test_threshold_independence.py`). Security enforcement operates at the database pre-filter and defense-in-depth layer, completely independent of the score threshold.
+3. **Threshold-Independence at Threshold 0.00 (Corpus size: 210 chunks across 3 tenants)**
+   - When the similarity score threshold is set to `0.00` (allowing every query to retrieve the top-5 permitted chunks regardless of similarity score; Corpus size: 210 chunks), cross-tenant leak rate remains **0.00%** (0 leaks across 4,972 pairs) and canary violations remain **0 / 823,996 checks** (verified in `tests/security/test_threshold_independence.py`). Access control operates at the vector pre-filter and relational verification layers, independent of the similarity score threshold.
 
----
+4. **Role-Condition Mutation Testing (Corpus size: 210 chunks across 3 tenants)**
+   - When the role filter condition is mutated/removed from `build_filter(principal)` in `src/app/rag/vectorstore/tenant_scoped_retriever.py`, the live counterfactual test immediately fails with real divergence assertions showing unauthorized chunks retrieved into World 1 candidate sets.
 
-### Empirical Retrieval Quality & Honest Benchmarking Disclosures
+5. **Cryptographic Audit Hash Chain (Corpus size: 210 chunks across 3 tenants)**
+   - Audit records are signed with SHA-256 chaining per tenant, protected with PostgreSQL transaction advisory locks (`pg_advisory_xact_lock`) and dedicated non-owner role privileges (`gatekeep_app`). Verification is performed via `/v1/audit/verify`.
 
-> [!WARNING]
-> **Retrieval Disclosure & Optimistic Bias**: Retrieval metrics on the expanded 64-query hand-written benchmark achieve 100% Recall@5, but **these numbers are optimistic**. The queries were drafted by an AI model with full access to the corpus chunk texts. A lexical audit indicates that **50.0% of the hand-written queries (32 of 64)** share $\ge 50\%$ content words or a 4+-word exact n-gram with the target chunk (e.g., `"iso 27001 information security certification"`). Real-world user queries exhibit greater phrasing divergence, typos, and semantic drift.
-
-#### Baseline vs. Expanded Retrieval Performance
-
-| Query Set | Corpus Size | Recall@5 | MRR | Notes & Methodology |
-|---|:---:|:---:|:---:|---|
-| **Original 30 Natural Queries (`main`)** | 210 chunks | **63.33%** (19/30) | **0.6167** | Raw evaluation as written; 9 queries failed due to non-existent document IDs |
-| **Original 30 Queries (Slug-Corrected)** | 210 chunks | **81.48%** (22/27) | **0.7963** | Evaluated against existing documents; 5 miss due to vocabulary divergence |
-| **Synthetic Keyword Queries** | 210 chunks | **100.00%** (487/487) | **0.9979** | High lexical overlap with chunk headers and template terms |
-| **Hand-Written Dev Set (32 queries)** | 210 chunks | **100.00%** (220/220) | **1.0000** | Used exclusively to calibrate similarity threshold |
-| **Hand-Written Held-Out Test Set (32 queries)**| 210 chunks | **100.00%** (220/220) | **0.9955** | Scored only once at the selected threshold (no tuning) |
-| **All Hand-Written Combined (64 queries)** | 210 chunks | **100.00%** (440/440) | **0.9978** | Optimistic benchmark (AI-generated with corpus access) |
+6. **Non-Owner Database Role & Least Privilege**
+   - The runtime API service connects using the unprivileged `gatekeep_app` database role, which possesses `SELECT`, `INSERT` on app tables, and row-level trigger constraints preventing `UPDATE` or `DELETE` on `audit_logs`. Database migrations and administrative tasks execute under a separate owner role.
 
 ---
 
-### Evaluation Metrics Summary (Corpus: 210 chunks, 30 documents, 3 tenants)
+## Retrieval evaluation (preliminary)
 
-> [!NOTE]
-> **Corpus Size Reconciliation (210 vs 246/247 chunks)**: The active multi-tenant evaluation corpus contains exactly **210 chunks** (30 document templates $\times$ 70 chunks/tenant $\times$ 3 tenants). Earlier reports showing 246 or 247 chunks included residual test chunks from prior unpurged integration test executions matching `chunk-` in the PostgreSQL database. The evaluation suite now operates on dedicated tenants (`eval-acme-corp`, `eval-globex-inc`, `eval-initech-llc`) that are cleanly isolated from demo tenants.
-
-| Metric | Before (Phase B) | After (Quality Hardening) | Scope & Evaluation Conditions |
-|---|:---:|:---:|---|
-| **Corpus Size** | 247 chunks | **210 chunks** (70/tenant $\times$ 3) | 30 documents across isolated evaluation tenants |
-| **Live Integration & Security Suite** | 31 passed, 0 skipped | **36 passed, 0 skipped, 1 opt-in** | `pytest -v` (`RUN_REAL_STACK=1`, `PERSISTENCE_BACKEND=postgres`, `VECTOR_BACKEND=qdrant`) |
-| **Cross-Tenant Leak Rate** | 0.00% (3,850 queries) | **0.00%** (4,972 pairs) | Evaluated across all 11 user personas in 3 organizations |
-| **Ubiquitous Canary Violations** | 0 / 89,250 (0.00%) | **0 / 823,996** (0.00%) | Canaries on **all 210 chunks**; 3,295,984 location inspections across 11 users |
-| **Counterfactual Invariance (True Physical Removal)** | 100.00% (1,750 pairs) | **100.00% (4,972 pairs)** | Evaluated for every principal (0 mismatches across all 11 users) |
-| **Threshold Independence (Threshold 0.00)** | Untested | **PASSED (0 leaks, 0 canaries)** | Proves security does not depend on similarity score filtering |
-| **Password Hashing Cost** | scrypt ($N=2^{14}$) | **scrypt ($N=2^{17}$, 128 MB RAM)** | $N=131072, r=8, p=1, \text{maxmem}=256\text{MB}$ (~435ms CPU hardness) |
-| **Role Separation & Least Privilege** | Non-owner `gatekeep_app` | **Non-owner `gatekeep_app`** | Runtime API runs as unprivileged user; migrations use owner role |
-
----
-
-### Parity as a Behavioral Metric & Reconciliation
-
-> [!NOTE]
-> **Why Restricted Parity Shifted (73.14% $\rightarrow$ 69.00% $\rightarrow$ 61.61% $\rightarrow$ 69.65%)**:
-> 1. In earlier evaluations with only keyword-dense synthetic queries, restricted query parity was **73.14% (207 / 283)**.
-> 2. When the first 30 hand-written natural queries were added, the total number of restricted-only queries evaluated against unauthorized users increased from 283 to 458. Certain natural queries regarding compensation, benefits, and office policies had legitimate semantic overlap ($>0.35$) with permitted documents in the user's tenant (e.g., employee handbook benefits and workplace ergonomics), returning permitted citations rather than empty results. As a result, the parity share shifted to **69.00% (316 / 458)**.
-> 3. In intermediate testing with canaries appended directly to embedded chunk text, pseudo-random hex tokens altered chunk vector positions, artificially inflating similarity scores and dropping parity to **61.61% (337 / 547)**.
-> 4. Restoring clean chunk text embedding while retaining canaries strictly in the payload for prompt/display validation restored true semantic distribution, yielding a calibrated parity share of **69.65% (381 / 547)**.
-> 5. In all cases, zero restricted documents or tokens were ever returned. Parity share is a threshold calibration metric, not a security boundary.
-
-#### Similarity Threshold Sweep (Calibrated on 210-Chunk Multi-Tenant Corpus)
-
-> [!NOTE]
-> **Threshold Calibration Objective**: Maximize restricted query parity while guaranteeing 100.0% Recall@5 across both Synthetic and Hand-Written Dev benchmark sets. While permitted recall remains 100.00% across the 0.15–0.35 range, the sweep strongly discriminates on restricted query parity (shifting from 1.28% at 0.15 to 69.65% at 0.35). Threshold `0.35` is selected as the calibrated cutoff because it eliminates spurious semantic overlap while preserving 100.00% Recall@5 on both Synthetic and Dev sets. Above 0.40, marginal recall degradation begins.
-
-| Similarity Threshold | Synth Recall@5 | Synth MRR | Dev Recall@5 | Dev MRR | Restricted Parity Share | Cross-Tenant Leak Rate | Canary Violations | Behavioral Profile |
-|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|---|
-| **0.15** | 100.00% | 0.9979 | 100.00% | 1.0000 | 1.28% (7 / 547) | 0.00% | 0 / 823,996 checks | Overly permissive; permitted chunks match loose topical overlap |
-| **0.20** | 100.00% | 0.9979 | 100.00% | 1.0000 | 7.31% (40 / 547) | 0.00% | 0 / 823,996 checks | Permissive; broad semantic recall with frequent cross-domain permitted matches |
-| **0.25** | 100.00% | 0.9979 | 100.00% | 1.0000 | 25.23% (138 / 547) | 0.00% | 0 / 823,996 checks | Moderate semantic matching; captures conversational queries |
-| **0.30** | 100.00% | 0.9979 | 100.00% | 1.0000 | 47.71% (261 / 547) | 0.00% | 0 / 823,996 checks | Balanced filter; eliminates weakly related company documents |
-| **0.35** | **100.00%** | **0.9979** | **100.00%** | **1.0000** | **69.65% (381 / 547)** | **0.00%** | **0 / 823,996 checks** | **Selected calibration threshold; 100% Dev & Held-Out Recall with 69.65% parity** |
-| **0.40** | 98.56% | 0.9856 | 100.00% | 1.0000 | 88.67% (485 / 547) | 0.00% | 0 / 823,996 checks | Conservative cutoff; minor drop in synthetic recall (4 misses) |
-| **0.45** | 97.13% | 0.9713 | 96.36% | 0.9636 | 95.98% (525 / 547) | 0.00% | 0 / 823,996 checks | Strict cutoff; 16 misses on concise technical terms |
+The evaluation corpus is small and synthetic (210 chunks across 3 tenants, 30 documents). Hand-written queries were written by an AI that had access to the corpus. Empirical testing indicates that the dense-retrieval-plus-threshold setup cannot reliably reject unanswerable questions on this corpus (at similarity threshold 0.35, 88.89% of unanswerable queries return permitted chunks with weak semantic overlap instead of being rejected). Retrieval quality is a separate concern from the security properties and is future work (hybrid search combining candidate-scoped BM25 with dense embeddings, and a larger blind human-written query set).
 
 ---
 
@@ -234,29 +184,25 @@ For the comprehensive threat model matrix and vulnerability mitigations, see [`d
 
 ---
 
-## Limitations & Implementation Status
+## Limitations and Future Work
 
-| Capability | Status | Notes |
-|---|---|---|
-| **Multi-Tenant Vector Pre-filtering** | **Done** | Enforced via Qdrant native filters and TenantScopedRetriever |
-| **Post-Retrieval ACL Verification** | **Done** | Verified against PostgreSQL before prompt assembly |
-| **Cryptographic Audit Hash Chain** | **Done** | Verified via `/v1/audit/verify` with transaction advisory locks |
-| **Document Ingestion (PDF, DOCX, MD, TXT)** | **Done** | Multipart parser with background status transitions (`ready`/`failed`) |
-| **Local Embedding Pipeline** | **Done** | `all-MiniLM-L6-v2` sentence-transformers with cosine threshold |
-| **Ollama Local LLM Support** | **Done** | Tested end-to-end with `llama3.2:3b`; `MockLLM` default for fast tests |
-| **Distributed Rate Limiting** | **Partial** | Sliding-window DB rate limiter implemented; Redis token bucket planned |
-| **Streaming Chunked Output** | **Omitted** | Omitted intentionally to preserve post-generation citation output guards |
-| **Full Admin CRUD & Enterprise SSO** | **Pending** | User creation and role assignment implemented; OIDC/SAML/SCIM on roadmap |
+1. **Timing Side Channels**: Vector search and relational verification execution times vary based on candidate counts and database index operations. The system does not enforce constant-time query responses.
+2. **Database Superuser Audit Bypass**: A PostgreSQL superuser or database owner with direct root access can bypass trigger constraints and mutate audit rows directly. However, any external modification breaks the cryptographic SHA-256 hash chain, which will be detected during integrity verification via `/v1/audit/verify`.
+3. **Single Region Deployment**: The service currently deploys in a single region; multi-region data replication, geographic tenant pinning, and cross-region consensus are not yet supported.
+4. **Demo Credentials & Static Passwords**: Default seeded persona credentials (`alice`, `bob`, `dave`, etc.) and default docker-compose passwords must be replaced with dynamically rotated credentials managed by a dedicated secrets manager in production environments.
+5. **No Enterprise SSO**: Authentication relies on local JWT tokens and database-backed password hashes. Enterprise identity providers (OIDC, SAML 2.0, SCIM directory synchronization) are not implemented.
+6. **Small Synthetic Corpus**: The active benchmark corpus consists of 210 chunks across 3 tenants with 30 document templates. Real-world corporate deployments involve significantly larger, messier, and unstructured corpora.
+7. **Preliminary Retrieval Evaluation**: Retrieval quality evaluation is preliminary. Dense retrieval with cosine thresholding struggles to reliably reject unanswerable queries on this corpus. Evaluating hybrid search (candidate-scoped BM25 + dense) against a larger blind human-written query set is future work.
 
 ---
 
 ## Resume Bullet Variants
 
 ### Variant 1: Security & Distributed Systems Focus
-> Architected a permission-aware multi-tenant RAG platform using FastAPI, PostgreSQL, and Qdrant, enforcing defense-in-depth with vector pre-filtering, relational ACL re-verification, and an append-only SHA-256 audit hash chain, achieving 0.00% cross-tenant data leakage across a 1,045-query evaluation benchmark.
+> Architected a permission-aware multi-tenant RAG platform using FastAPI, PostgreSQL, and Qdrant, enforcing defense-in-depth with vector pre-filtering, relational ACL re-verification, and an append-only SHA-256 audit hash chain, achieving 0.00% cross-tenant data leakage across an evaluation benchmark.
 
 ### Variant 2: Full-Stack AI & Infrastructure Focus
 > Engineered an enterprise RAG service featuring dual vector/relational access control, local embedding models (`all-MiniLM-L6-v2`), and local LLM integration (`llama3.2:3b`), paired with an interactive React audit and side-by-side role comparison frontend and CI/CD pipelines incorporating pip-audit and gitleaks scanning.
 
-### Variant 3: Machine Learning & Eval Focus
-> Designed and executed an expanded 1,045-query adversarial evaluation suite measuring multi-tenant RAG security, validating 0.00% leak rate against prompt injections, 92.86% Recall@5, 0.8750 MRR for permitted queries, and 98.77% response shape parity for restricted queries.
+### Variant 3: Security & Verification Focus
+> Designed and executed an expanded adversarial security evaluation suite measuring multi-tenant RAG isolation, validating 0.00% cross-tenant data leakage, 100.00% counterfactual invariance across 4,972 principal-query pairs with physical document deletion, and 823,996 canary token inspections with zero violations across 210 corpus chunks.
