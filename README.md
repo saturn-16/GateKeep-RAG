@@ -195,14 +195,3 @@ For the comprehensive threat model matrix and vulnerability mitigations, see [`d
 7. **Preliminary Retrieval Evaluation**: Retrieval quality evaluation is preliminary. Dense retrieval with cosine thresholding struggles to reliably reject unanswerable queries on this corpus. Evaluating hybrid search (candidate-scoped BM25 + dense) against a larger blind human-written query set is future work.
 
 ---
-
-## Resume Bullet Variants
-
-### Variant 1: Security & Distributed Systems Focus
-> Architected a permission-aware multi-tenant RAG platform using FastAPI, PostgreSQL, and Qdrant, enforcing defense-in-depth with vector pre-filtering, relational ACL re-verification, and an append-only SHA-256 audit hash chain, achieving 0.00% cross-tenant data leakage across an evaluation benchmark.
-
-### Variant 2: Full-Stack AI & Infrastructure Focus
-> Engineered an enterprise RAG service featuring dual vector/relational access control, local embedding models (`all-MiniLM-L6-v2`), and local LLM integration (`llama3.2:3b`), paired with an interactive React audit and side-by-side role comparison frontend and CI/CD pipelines incorporating pip-audit and gitleaks scanning.
-
-### Variant 3: Security & Verification Focus
-> Designed and executed an expanded adversarial security evaluation suite measuring multi-tenant RAG isolation, validating 0.00% cross-tenant data leakage, 100.00% counterfactual invariance across 4,972 principal-query pairs with physical document deletion, and 823,996 canary token inspections with zero violations across 210 corpus chunks.
